@@ -18,6 +18,14 @@ test('entrega os fluxos operacionais solicitados', async () => {
   assert.match(page, /viacep\.com\.br/);
   assert.match(page, /renderPersonEditor/);
   assert.match(page, /Mapa pronto para receber a operação/);
+  assert.match(page, /function renderPeoplePage/);
+  assert.match(page, /function renderLocationsPage/);
+  assert.match(page, /function renderSchedulePage/);
+  assert.doesNotMatch(
+    page,
+    /return <(?:PeoplePage|LocationsPage|SchedulePage|RoutesPage|HistoryPage|Dashboard)\s*\/>/,
+  );
+  assert.doesNotMatch(page, /autoFocus/);
 });
 
 test('mantém contrato de banco e publicação', async () => {

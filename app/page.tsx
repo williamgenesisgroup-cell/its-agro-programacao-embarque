@@ -2000,7 +2000,7 @@ export default function Home() {
     );
   }
 
-  function Dashboard() {
+  function renderDashboard() {
     const upcoming = schedules
       .filter(
         (schedule) =>
@@ -2265,7 +2265,7 @@ export default function Home() {
     );
   }
 
-  function PeoplePage() {
+  function renderPeoplePage() {
     return (
       <>
         <SectionTitle
@@ -2476,7 +2476,7 @@ export default function Home() {
     );
   }
 
-  function LocationsPage() {
+  function renderLocationsPage() {
     return (
       <>
         <SectionTitle
@@ -2600,7 +2600,7 @@ export default function Home() {
     );
   }
 
-  function NearbyPanel() {
+  function renderNearbyPanel() {
     const destination = locations.find(
       (location) => location.id === scheduleDraft.locationId,
     );
@@ -2677,7 +2677,7 @@ export default function Home() {
       </section>
     );
   }
-  function ScheduleAlerts() {
+  function renderScheduleAlerts() {
     const suggestion = suggestionForSchedule();
     return (
       <>
@@ -2762,7 +2762,7 @@ export default function Home() {
       </>
     );
   }
-  function SchedulePage() {
+  function renderSchedulePage() {
     const selected = new Set(
       scheduleDraft.people.map((person) => person.sourcePersonId),
     );
@@ -2969,7 +2969,7 @@ export default function Home() {
                   <MapIcon size={16} /> Ver no mapa
                 </button>
               </div>
-              {showNearby && <NearbyPanel />}
+              {showNearby && renderNearbyPanel()}
               <div className="picker-toolbar">
                 <div className="search-box">
                   <Search size={16} />
@@ -3045,7 +3045,7 @@ export default function Home() {
                   )}
                 </div>
               </div>
-              <ScheduleAlerts />
+              {renderScheduleAlerts()}
               {scheduleDraft.people.length ? (
                 <div className="route-stats">
                   <div>
@@ -3331,7 +3331,7 @@ export default function Home() {
     );
   }
 
-  function RoutesPage() {
+  function renderRoutesPage() {
     const mapPoints = operationMarkers.map((marker) => toPoint(marker.person));
     const filters = (
       <div className={`map-filters ${showMapFilters ? 'open' : ''}`}>
@@ -3671,7 +3671,7 @@ export default function Home() {
     );
   }
 
-  function HistoryPage() {
+  function renderHistoryPage() {
     return (
       <>
         <SectionTitle
@@ -3850,7 +3850,7 @@ export default function Home() {
       </>
     );
   }
-  function ComparisonModal() {
+  function renderComparisonModal() {
     if (!comparison) return null;
     const economy = Math.max(0, comparison.originalKm - comparison.suggestedKm);
     const time = Math.max(0, comparison.originalMin - comparison.suggestedMin);
@@ -3944,12 +3944,12 @@ export default function Home() {
           <span>Carregando operação...</span>
         </div>
       );
-    if (view === 'people') return <PeoplePage />;
-    if (view === 'locations') return <LocationsPage />;
-    if (view === 'schedule') return <SchedulePage />;
-    if (view === 'routes') return <RoutesPage />;
-    if (view === 'history') return <HistoryPage />;
-    return <Dashboard />;
+    if (view === 'people') return renderPeoplePage();
+    if (view === 'locations') return renderLocationsPage();
+    if (view === 'schedule') return renderSchedulePage();
+    if (view === 'routes') return renderRoutesPage();
+    if (view === 'history') return renderHistoryPage();
+    return renderDashboard();
   }
   return (
     <div className="app-shell">
@@ -4076,7 +4076,7 @@ export default function Home() {
           </button>
         ))}
       </div>
-      <ComparisonModal />
+      {renderComparisonModal()}
     </div>
   );
 }
