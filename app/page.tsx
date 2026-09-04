@@ -32,6 +32,7 @@ import {
   Menu,
   MessageCircle,
   Navigation,
+  Star,
   Pencil,
   Phone,
   Plus,
@@ -49,7 +50,8 @@ import {
   Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import 'leaflet/dist/leaflet.css';
 
 import {
   buildRoutePlan,
@@ -62,6 +64,19 @@ import {
 } from '@/lib/route-service';
 import { compareCandidateToDestination } from '@/lib/logistics-service';
 import {
+  analyzeOperation,
+  applyOperationSuggestion,
+  type OperationAnalysis,
+  type OperationAssignment,
+  type OperationPriority,
+  type OperationSuggestion,
+} from '@/lib/operation-optimizer';
+import {
+  buildAddressQuery,
+  geocodeWithNominatim,
+  type GeocodingSuggestion,
+} from '@/lib/geocoding-service';
+import {
   isDevelopmentSeedAllowed,
   readPersistedState,
   writePersistedState,
@@ -73,6 +88,7 @@ type View =
   | 'locations'
   | 'schedule'
   | 'routes'
+  | 'planning'
   | 'history';
 type ScheduleStatus = 'Rascunho' | 'Programado' | 'Finalizado' | 'Cancelado';
 type OperationalStatus =
@@ -118,6 +134,20 @@ type BoardingLocation = {
   lat: number | null;
   lng: number | null;
   notes: string;
+  description: string;
+  accessInstructions: string;
+  contactName: string;
+  contactPhone: string;
+  contactWhatsapp: string;
+  openingHours: string;
+  favorite: boolean;
+  usageCount: number;
+  lastUsedAt: string;
+  locationQuality: 'confirmed' | 'approximate' | 'missing';
+  locationConfirmed: boolean;
+  locationConfirmationSource: string;
+  typeDescription: string;
+  normalizedName: string;
   active: boolean;
 };
 type SchedulePerson = RoutePoint & { sourcePersonId: string };
@@ -157,6 +187,24 @@ type Schedule = {
   arrivalLeadMinutes: number;
   stopBufferMinutes: number;
 };
+type DailyPlan = {
+  id: string;
+  date: string;
+  assignments: OperationAssignment[];
+  originalAssignments: OperationAssignment[];
+  analysis: OperationAnalysis | null;
+  priority: OperationPriority;
+  maxDistanceKm: number | null;
+  maxMinutes: number | null;
+  decisions: PlanningDecision[];
+  updatedAt: string;
+};
+type PlanningDecision = {
+  id: string;
+  suggestionId: string;
+  decision: 'APLICADA' | 'IGNORADA' | 'MANTIDA';
+  createdAt: string;
+};
 type Toast = { message: string; tone: 'success' | 'error' | 'info' } | null;
 type Comparison = {
   original: Person;
@@ -184,6 +232,7 @@ const NAV: { id: View; label: string; icon: LucideIcon }[] = [
   { id: 'locations', label: 'Locais de embarque', icon: MapPin },
   { id: 'schedule', label: 'Programação', icon: CalendarDays },
   { id: 'routes', label: 'Mapa da operação', icon: MapIcon },
+  { id: 'planning', label: 'Planejamento do dia', icon: Clipboard },
   { id: 'history', label: 'Histórico', icon: History },
 ];
 const LOCATION_TYPES = [
@@ -194,6 +243,11 @@ const LOCATION_TYPES = [
   'Unidade',
   'Armazém',
   'Fazenda',
+  'Silo',
+  'Terminal',
+  'Porto',
+  'Pátio',
+  'Filial',
   'Ponto de encontro',
   'Outro',
 ];
@@ -253,6 +307,41 @@ function formatCep(value: string) {
   return digits.length > 5
     ? `${digits.slice(0, 5)}-${digits.slice(5)}`
     : digits;
+}
+function normalizeText(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+function locationQualityOf(location: BoardingLocation) {
+  if (location.locationQuality) return location.locationQuality;
+  return location.lat != null && location.lng != null
+    ? 'approximate'
+    : 'missing';
+}
+function normalizeLocation(item: Partial<BoardingLocation>): BoardingLocation {
+  const base = emptyLocation();
+  const record = { ...base, ...item };
+  return {
+    ...record,
+    id: record.id || makeId('location'),
+    name: record.name || '',
+    type: record.type || 'Ponto de encontro',
+    typeDescription: record.typeDescription || '',
+    normalizedName: record.normalizedName || normalizeText(record.name || ''),
+    favorite: Boolean(record.favorite),
+    usageCount: Number(record.usageCount) || 0,
+    lastUsedAt: record.lastUsedAt || '',
+    locationQuality:
+      record.locationQuality ||
+      (record.lat != null && record.lng != null ? 'approximate' : 'missing'),
+    locationConfirmed: Boolean(record.locationConfirmed),
+    locationConfirmationSource: record.locationConfirmationSource || '',
+  };
 }
 function cssStatus(value: string) {
   return value.toLowerCase().replaceAll(' ', '-').replaceAll('ã', 'a');
@@ -331,6 +420,20 @@ function emptyLocation(): BoardingLocation {
     lat: null,
     lng: null,
     notes: '',
+    description: '',
+    accessInstructions: '',
+    contactName: '',
+    contactPhone: '',
+    contactWhatsapp: '',
+    openingHours: '',
+    favorite: false,
+    usageCount: 0,
+    lastUsedAt: '',
+    locationQuality: 'missing',
+    locationConfirmed: false,
+    locationConfirmationSource: '',
+    typeDescription: '',
+    normalizedName: '',
     active: true,
   };
 }
@@ -359,6 +462,33 @@ function emptySchedule(): Schedule {
     status: 'Rascunho',
     arrivalLeadMinutes: 30,
     stopBufferMinutes: 10,
+  };
+}
+function normalizeDailyPlan(item: Partial<DailyPlan>): DailyPlan {
+  const date = item.date || todayIso();
+  const assignments = Array.isArray(item.assignments)
+    ? item.assignments.map((assignment) => ({
+        id: assignment.id || makeId('assignment'),
+        personId: assignment.personId || '',
+        locationId: assignment.locationId || '',
+        time: assignment.time || '',
+      }))
+    : [];
+  return {
+    id: item.id || `plan-${date}`,
+    date,
+    assignments,
+    originalAssignments: Array.isArray(item.originalAssignments)
+      ? item.originalAssignments.map((assignment) => ({ ...assignment }))
+      : assignments.map((assignment) => ({ ...assignment })),
+    analysis: item.analysis || null,
+    priority: item.priority || 'balanced',
+    maxDistanceKm: item.maxDistanceKm ?? null,
+    maxMinutes: item.maxMinutes ?? null,
+    decisions: Array.isArray(item.decisions)
+      ? item.decisions.map((decision) => ({ ...decision }))
+      : [],
+    updatedAt: item.updatedAt || new Date().toISOString(),
   };
 }
 
@@ -770,6 +900,144 @@ function MiniMap({
     </div>
   );
 }
+void MiniMap;
+
+function RealMap({
+  points,
+  destination,
+  title,
+  onSelect,
+  pickerValue,
+  onPickerChange,
+  onConfirm,
+}: {
+  points: RoutePoint[];
+  destination?: RoutePoint | null;
+  title: string;
+  onSelect?: (id: string) => void;
+  pickerValue?: { lat: number | null; lng: number | null };
+  onPickerChange?: (value: { lat: number; lng: number }) => void;
+  onConfirm?: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<import('leaflet').Map | null>(null);
+  const pickerMarkerRef = useRef<import('leaflet').Marker | null>(null);
+  const [mapReady, setMapReady] = useState(false);
+  const all = destination ? [...points, destination] : points;
+  const located = all.filter((point) => point.lat != null && point.lng != null);
+
+  useEffect(() => {
+    let disposed = false;
+    void import('leaflet').then((L) => {
+      if (disposed || !containerRef.current || mapRef.current) return;
+      const center = located.length
+        ? [
+            located.reduce((sum, point) => sum + (point.lat as number), 0) /
+              located.length,
+            located.reduce((sum, point) => sum + (point.lng as number), 0) /
+              located.length,
+          ]
+        : [-14.2, -51.9];
+      const map = L.map(containerRef.current, { zoomControl: true }).setView(
+        center as [number, number],
+        located.length ? 10 : 4,
+      );
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19,
+      }).addTo(map);
+      located.forEach((point) => {
+        const marker = L.marker([point.lat as number, point.lng as number], {
+          title: point.label,
+        }).addTo(map);
+        marker.bindPopup(
+          `<strong>${point.label}</strong><br>${point.city || ''}`,
+        );
+        if (onSelect) marker.on('click', () => onSelect(point.id));
+      });
+      if (located.length > 1) {
+        map.fitBounds(
+          L.latLngBounds(
+            located.map((point) => [point.lat as number, point.lng as number]),
+          ),
+          { padding: [24, 24] },
+        );
+      }
+      if (onPickerChange) {
+        const picker =
+          pickerValue?.lat != null && pickerValue?.lng != null
+            ? L.marker([pickerValue.lat, pickerValue.lng], { draggable: true })
+            : L.marker(center as [number, number], { draggable: true });
+        picker.addTo(map).bindTooltip('Arraste ou clique para marcar o local', {
+          permanent: false,
+        });
+        picker.on('dragend', () => {
+          const position = picker.getLatLng();
+          onPickerChange({ lat: position.lat, lng: position.lng });
+        });
+        map.on('click', (event) => {
+          picker.setLatLng(event.latlng);
+          onPickerChange({ lat: event.latlng.lat, lng: event.latlng.lng });
+        });
+        pickerMarkerRef.current = picker;
+      }
+      mapRef.current = map;
+      setMapReady(true);
+    });
+    return () => {
+      disposed = true;
+      pickerMarkerRef.current = null;
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pickerValue || !pickerMarkerRef.current) return;
+    if (pickerValue.lat != null && pickerValue.lng != null) {
+      pickerMarkerRef.current.setLatLng([pickerValue.lat, pickerValue.lng]);
+    }
+  }, [pickerValue?.lat, pickerValue?.lng]);
+
+  return (
+    <div className="real-map-shell">
+      <div className="map-heading">
+        <div>
+          <p className="eyebrow">MAPA REAL · OPENSTREETMAP</p>
+          <h3>{title}</h3>
+        </div>
+        {onPickerChange && (
+          <Badge tone={mapReady ? 'live' : 'neutral'}>
+            {mapReady ? 'Mapa ativo' : 'Carregando mapa'}
+          </Badge>
+        )}
+      </div>
+      <div ref={containerRef} className="real-map-canvas" aria-label={title} />
+      {!located.length && !onPickerChange && (
+        <p className="map-note">
+          <Info size={14} /> Cadastre coordenadas para posicionar os marcadores.
+        </p>
+      )}
+      {onPickerChange && (
+        <div className="map-picker-actions">
+          <span>
+            {pickerValue?.lat != null && pickerValue?.lng != null
+              ? 'Pino posicionado. Confira antes de confirmar.'
+              : 'Clique no mapa ou arraste o pino para marcar.'}
+          </span>
+          <button
+            type="button"
+            className="button button-secondary"
+            onClick={onConfirm}
+            disabled={pickerValue?.lat == null || pickerValue?.lng == null}
+          >
+            <Check size={15} /> Confirmar coordenadas
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function Home() {
   const [view, setView] = useState<View>('dashboard');
@@ -779,6 +1047,7 @@ export default function Home() {
   const [locations, setLocations] = useState<BoardingLocation[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [suggestions, setSuggestions] = useState<SuggestionDecision[]>([]);
+  const [dailyPlans, setDailyPlans] = useState<DailyPlan[]>([]);
   const [costPerKm, setCostPerKm] = useState(1.2);
   const [toast, setToast] = useState<Toast>(null);
   const [personDraft, setPersonDraft] = useState<Person>(emptyPerson());
@@ -791,6 +1060,15 @@ export default function Home() {
   const [locationCepState, setLocationCepState] =
     useState<CepLookupState>('idle');
   const [locationCepMessage, setLocationCepMessage] = useState('');
+  const [locationGeocodeState, setLocationGeocodeState] =
+    useState<CepLookupState>('idle');
+  const [locationGeocodeMessage, setLocationGeocodeMessage] = useState('');
+  const [locationGeocodeSuggestions, setLocationGeocodeSuggestions] = useState<
+    GeocodingSuggestion[]
+  >([]);
+  const [locationDuplicateMatches, setLocationDuplicateMatches] = useState<
+    BoardingLocation[]
+  >([]);
   const [personQuery, setPersonQuery] = useState('');
   const [personStatus, setPersonStatus] = useState('all');
   const [locationQuery, setLocationQuery] = useState('');
@@ -808,18 +1086,41 @@ export default function Home() {
   const [mapCity, setMapCity] = useState('all');
   const [mapSupervisor, setMapSupervisor] = useState('all');
   const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
-  const [mapZoom, setMapZoom] = useState(1);
   const [showMapFilters, setShowMapFilters] = useState(false);
   const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
   const [ignoredSuggestion, setIgnoredSuggestion] = useState(false);
   const [comparison, setComparison] = useState<Comparison>(null);
+  const [planningDate, setPlanningDate] = useState(todayIso());
+  const [planningAssignments, setPlanningAssignments] = useState<
+    OperationAssignment[]
+  >([]);
+  const [planningAnalysis, setPlanningAnalysis] =
+    useState<OperationAnalysis | null>(null);
+  const [planningPriority, setPlanningPriority] =
+    useState<OperationPriority>('balanced');
+  const [planningMaxDistance, setPlanningMaxDistance] = useState('');
+  const [planningMaxMinutes, setPlanningMaxMinutes] = useState('');
+  const [planningOriginalAssignments, setPlanningOriginalAssignments] =
+    useState<OperationAssignment[]>([]);
+  const [planningIgnoredSuggestionIds, setPlanningIgnoredSuggestionIds] =
+    useState<string[]>([]);
+  const [planningDecisions, setPlanningDecisions] = useState<
+    PlanningDecision[]
+  >([]);
 
   useEffect(() => {
     const saved = readPersistedState();
     if (saved) {
       setPeople(saved.people as Person[]);
-      setLocations(saved.locations as BoardingLocation[]);
+      setLocations(
+        (saved.locations as Partial<BoardingLocation>[]).map(normalizeLocation),
+      );
       setSchedules(saved.schedules as Schedule[]);
+      setDailyPlans(
+        (saved.dailyPlans as Partial<DailyPlan>[] | undefined)?.map(
+          normalizeDailyPlan,
+        ) ?? [],
+      );
       setSuggestions((saved.suggestions ?? []) as SuggestionDecision[]);
       setCostPerKm(saved.costPerKm ?? 1.2);
     } else if (isDevelopmentSeedAllowed()) {
@@ -835,10 +1136,11 @@ export default function Home() {
         people,
         locations,
         schedules,
+        dailyPlans,
         suggestions,
         costPerKm,
       });
-  }, [ready, people, locations, schedules, suggestions, costPerKm]);
+  }, [ready, people, locations, schedules, dailyPlans, suggestions, costPerKm]);
   useEffect(() => {
     if (!routePlan) return;
     setRoutePlan((current) =>
@@ -860,6 +1162,34 @@ export default function Home() {
     const timer = window.setTimeout(() => setToast(null), 4300);
     return () => window.clearTimeout(timer);
   }, [toast]);
+  useEffect(() => {
+    const savedPlan = dailyPlans.find((plan) => plan.date === planningDate);
+    if (savedPlan) {
+      setPlanningAssignments(
+        savedPlan.assignments.map((assignment) => ({ ...assignment })),
+      );
+      setPlanningOriginalAssignments(
+        savedPlan.originalAssignments.map((assignment) => ({ ...assignment })),
+      );
+      setPlanningAnalysis(savedPlan.analysis);
+      setPlanningPriority(savedPlan.priority);
+      setPlanningMaxDistance(
+        savedPlan.maxDistanceKm == null ? '' : String(savedPlan.maxDistanceKm),
+      );
+      setPlanningMaxMinutes(
+        savedPlan.maxMinutes == null ? '' : String(savedPlan.maxMinutes),
+      );
+      setPlanningDecisions(
+        savedPlan.decisions.map((decision) => ({ ...decision })),
+      );
+    } else {
+      setPlanningAssignments([]);
+      setPlanningOriginalAssignments([]);
+      setPlanningAnalysis(null);
+      setPlanningDecisions([]);
+    }
+    setPlanningIgnoredSuggestionIds([]);
+  }, [planningDate, dailyPlans]);
   useEffect(() => {
     if (!showPersonForm) {
       setPersonCepState('idle');
@@ -896,11 +1226,18 @@ export default function Home() {
   );
   const visibleLocations = useMemo(
     () =>
-      locations.filter((location) =>
-        `${location.name} ${location.city} ${location.address}`
-          .toLowerCase()
-          .includes(locationQuery.toLowerCase()),
-      ),
+      locations
+        .filter((location) =>
+          normalizeText(
+            `${location.name} ${location.type} ${location.city} ${location.address} ${location.cep}`,
+          ).includes(normalizeText(locationQuery)),
+        )
+        .sort(
+          (a, b) =>
+            Number(b.favorite) - Number(a.favorite) ||
+            b.usageCount - a.usageCount ||
+            a.name.localeCompare(b.name),
+        ),
     [locations, locationQuery],
   );
   const visibleSchedules = useMemo(
@@ -927,59 +1264,81 @@ export default function Home() {
       ),
     [visibleSchedules, historyStart, historyEnd],
   );
-  const operationMarkers = useMemo(
-    () =>
-      activePeople
-        .map((person) => {
-          const next = schedules
-            .filter(
-              (schedule) =>
-                schedule.date >= todayIso() &&
-                schedule.status !== 'Cancelado' &&
-                schedule.people.some(
-                  (item) => item.sourcePersonId === person.id,
-                ),
-            )
-            .sort((a, b) =>
-              `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`),
-            )[0];
-          const location = next
-            ? (locations.find((item) => item.id === next.locationId) ?? null)
+  const operationMarkers = useMemo(() => {
+    const todayPlan = dailyPlans.find((plan) => plan.date === todayIso());
+    return activePeople
+      .map((person) => {
+        const scheduledNext = schedules
+          .filter(
+            (schedule) =>
+              schedule.date >= todayIso() &&
+              schedule.status !== 'Cancelado' &&
+              schedule.people.some((item) => item.sourcePersonId === person.id),
+          )
+          .sort((a, b) =>
+            `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`),
+          )[0];
+        const assignment = todayPlan?.assignments.find(
+          (item) => item.personId === person.id,
+        );
+        const plannedLocation = assignment
+          ? locations.find((item) => item.id === assignment.locationId)
+          : null;
+        const plannedNext =
+          plannedLocation && assignment
+            ? {
+                ...emptySchedule(),
+                id: `plan-${todayPlan?.id}-${assignment.id}`,
+                date: todayIso(),
+                time: assignment.time || '—',
+                locationId: plannedLocation.id,
+                destinationName: plannedLocation.name,
+                destinationAddress: addressOf(plannedLocation),
+                destinationCity: plannedLocation.city,
+                destinationUf: plannedLocation.uf,
+                destinationLat: plannedLocation.lat,
+                destinationLng: plannedLocation.lng,
+                status: 'Rascunho' as ScheduleStatus,
+              }
             : null;
-          const destination = next ? destinationPoint(location, next) : null;
-          const leg = destination
-            ? estimateLeg(toPoint(person), destination)
-            : null;
-          return {
-            person,
-            next,
-            destination,
-            leg,
-            status: next
-              ? ('Programado' as OperationalStatus)
-              : person.operationalStatus,
-          };
-        })
-        .filter(
-          (marker) =>
-            `${marker.person.name} ${marker.person.city} ${marker.person.currentLocation}`
-              .toLowerCase()
-              .includes(mapSearch.toLowerCase()) &&
-            (mapStatus === 'all' || marker.status === mapStatus) &&
-            (mapCity === 'all' || marker.person.city === mapCity) &&
-            (mapSupervisor === 'all' ||
-              marker.person.supervisor === mapSupervisor),
-        ),
-    [
-      activePeople,
-      locations,
-      mapCity,
-      mapSearch,
-      mapStatus,
-      mapSupervisor,
-      schedules,
-    ],
-  );
+        const next = scheduledNext ?? plannedNext;
+        const location = next
+          ? (locations.find((item) => item.id === next.locationId) ?? null)
+          : null;
+        const destination = next ? destinationPoint(location, next) : null;
+        const leg = destination
+          ? estimateLeg(toPoint(person), destination)
+          : null;
+        return {
+          person,
+          next,
+          destination,
+          leg,
+          status: next
+            ? ('Programado' as OperationalStatus)
+            : person.operationalStatus,
+        };
+      })
+      .filter(
+        (marker) =>
+          normalizeText(
+            `${marker.person.name} ${marker.person.city} ${marker.person.currentLocation}`,
+          ).includes(normalizeText(mapSearch)) &&
+          (mapStatus === 'all' || marker.status === mapStatus) &&
+          (mapCity === 'all' || marker.person.city === mapCity) &&
+          (mapSupervisor === 'all' ||
+            marker.person.supervisor === mapSupervisor),
+      );
+  }, [
+    activePeople,
+    dailyPlans,
+    locations,
+    mapCity,
+    mapSearch,
+    mapStatus,
+    mapSupervisor,
+    schedules,
+  ]);
   const selectedMarker =
     operationMarkers.find((marker) => marker.person.id === selectedMarkerId) ??
     null;
@@ -1015,6 +1374,31 @@ export default function Home() {
       setPersonCepMessage(
         'Endereço preenchido. Confira e complemente manualmente se precisar.',
       );
+      if (personDraft.lat == null || personDraft.lng == null) {
+        try {
+          const results = await geocodeWithNominatim(
+            buildAddressQuery({
+              address: data.logradouro,
+              neighborhood: data.bairro,
+              city: data.localidade,
+              uf: data.uf,
+              cep: data.cep || digits,
+            }),
+          );
+          if (results[0]) {
+            setPersonDraft((current) =>
+              current.lat != null || current.lng != null
+                ? current
+                : { ...current, lat: results[0].lat, lng: results[0].lng },
+            );
+            setPersonCepMessage(
+              'Endereço preenchido e coordenadas aproximadas localizadas. Confira os dados antes de salvar.',
+            );
+          }
+        } catch {
+          // O endereço continua utilizável mesmo quando o provedor de mapa não responde.
+        }
+      }
     } catch {
       setPersonCepState('error');
       setPersonCepMessage(
@@ -1038,19 +1422,60 @@ export default function Home() {
       if (!response.ok) throw new Error('Falha na consulta');
       const data = (await response.json()) as ViaCepResult;
       if (data.erro) throw new Error('CEP não encontrado');
+      const nextDraft = {
+        ...locationDraft,
+        cep: formatCep(data.cep || digits),
+        address: data.logradouro || locationDraft.address,
+        neighborhood: data.bairro || locationDraft.neighborhood,
+        city: data.localidade || locationDraft.city,
+        uf: data.uf || locationDraft.uf,
+        complement: data.complemento || locationDraft.complement,
+      };
       setLocationDraft((current) => ({
         ...current,
-        cep: formatCep(data.cep || digits),
-        address: data.logradouro || current.address,
-        neighborhood: data.bairro || current.neighborhood,
-        city: data.localidade || current.city,
-        uf: data.uf || current.uf,
-        complement: data.complemento || current.complement,
+        ...nextDraft,
       }));
       setLocationCepState('success');
       setLocationCepMessage(
         'Endereço preenchido. Confira e complemente manualmente se precisar.',
       );
+      if (nextDraft.lat == null || nextDraft.lng == null) {
+        setLocationGeocodeState('loading');
+        setLocationGeocodeMessage('Procurando coordenadas aproximadas...');
+        try {
+          const results = await geocodeWithNominatim(
+            buildAddressQuery(nextDraft),
+          );
+          setLocationGeocodeSuggestions(results);
+          if (results[0]) {
+            setLocationDraft((current) =>
+              current.locationConfirmed
+                ? current
+                : {
+                    ...current,
+                    lat: results[0].lat,
+                    lng: results[0].lng,
+                    locationQuality: 'approximate',
+                    locationConfirmationSource: 'OpenStreetMap/Nominatim',
+                  },
+            );
+            setLocationGeocodeMessage(
+              'Coordenadas aproximadas preenchidas. Confirme no mapa ou ajuste manualmente.',
+            );
+          } else {
+            setLocationGeocodeState('error');
+            setLocationGeocodeMessage(
+              'Nenhuma coordenada encontrada. Você pode marcar o local no mapa.',
+            );
+          }
+          setLocationGeocodeState(results[0] ? 'success' : 'error');
+        } catch {
+          setLocationGeocodeState('error');
+          setLocationGeocodeMessage(
+            'Geocodificação indisponível agora. Marque o ponto no mapa ou digite as coordenadas.',
+          );
+        }
+      }
     } catch {
       setLocationCepState('error');
       setLocationCepMessage(
@@ -1058,9 +1483,61 @@ export default function Home() {
       );
     }
   }
+  async function searchLocationGeocode() {
+    const query = buildAddressQuery(locationDraft);
+    if (!query) {
+      setLocationGeocodeState('error');
+      setLocationGeocodeMessage(
+        'Informe endereço, cidade ou CEP para buscar no mapa.',
+      );
+      return;
+    }
+    setLocationGeocodeState('loading');
+    setLocationGeocodeMessage('Buscando sugestões no mapa...');
+    try {
+      const results = await geocodeWithNominatim(query);
+      setLocationGeocodeSuggestions(results);
+      setLocationGeocodeState(results.length ? 'success' : 'error');
+      setLocationGeocodeMessage(
+        results.length
+          ? 'Escolha uma sugestão para confirmar o ponto.'
+          : 'Nenhum resultado encontrado.',
+      );
+    } catch {
+      setLocationGeocodeState('error');
+      setLocationGeocodeMessage(
+        'Mapa indisponível agora. Confira o endereço ou marque manualmente.',
+      );
+    }
+  }
+  function selectLocationGeocode(result: GeocodingSuggestion) {
+    setLocationDraft((current) => ({
+      ...current,
+      lat: result.lat,
+      lng: result.lng,
+      locationQuality: 'approximate',
+      locationConfirmed: false,
+      locationConfirmationSource: 'OpenStreetMap/Nominatim',
+    }));
+    setLocationGeocodeMessage(
+      'Ponto selecionado. Confirme as coordenadas no mapa antes de salvar.',
+    );
+  }
+  function confirmLocationCoordinates() {
+    setLocationDraft((current) => ({
+      ...current,
+      locationQuality:
+        current.lat != null && current.lng != null ? 'confirmed' : 'missing',
+      locationConfirmed: current.lat != null && current.lng != null,
+      locationConfirmationSource:
+        current.lat != null && current.lng != null ? 'Operação · mapa' : '',
+    }));
+    setLocationGeocodeMessage('Coordenadas confirmadas pela operação.');
+    setLocationGeocodeState('success');
+  }
   function locateNotice() {
     notify(
-      'Localização automática depende de um provedor externo configurado. Informe latitude e longitude para habilitar a rota.',
+      'O mapa usa OpenStreetMap/Nominatim. Busque pelo endereço ou informe latitude e longitude manualmente para habilitar a rota.',
       'info',
     );
   }
@@ -1070,13 +1547,14 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
   function savePerson() {
+    const hasCoordinates = personDraft.lat != null && personDraft.lng != null;
     if (
       !personDraft.name.trim() ||
-      !personDraft.address.trim() ||
-      !personDraft.city.trim()
+      ((!personDraft.address.trim() || !personDraft.city.trim()) &&
+        !hasCoordinates)
     )
       return notify(
-        'Informe nome, endereço e cidade para salvar a pessoa.',
+        'Informe nome, endereço e cidade, ou marque coordenadas válidas no mapa.',
         'error',
       );
     const record = {
@@ -1096,20 +1574,42 @@ export default function Home() {
       'success',
     );
   }
-  function saveLocation() {
+  function saveLocation(force = false) {
+    const hasCoordinates =
+      locationDraft.lat != null && locationDraft.lng != null;
     if (
       !locationDraft.name.trim() ||
-      !locationDraft.address.trim() ||
-      !locationDraft.city.trim()
+      ((!locationDraft.address.trim() || !locationDraft.city.trim()) &&
+        !hasCoordinates)
     )
       return notify(
-        'Informe nome, endereço e cidade para salvar o local.',
+        'Informe nome, endereço e cidade, ou confirme coordenadas válidas no mapa.',
         'error',
       );
-    const record = {
+    const record = normalizeLocation({
       ...locationDraft,
       id: locationDraft.id || makeId('location'),
-    };
+      normalizedName: normalizeText(locationDraft.name),
+      locationQuality: hasCoordinates
+        ? locationDraft.locationQuality === 'missing'
+          ? 'approximate'
+          : locationDraft.locationQuality
+        : 'missing',
+    });
+    const duplicateMatches = locations.filter(
+      (location) =>
+        location.id !== record.id &&
+        normalizeText(`${location.name} ${location.city}`) ===
+          normalizeText(`${record.name} ${record.city}`),
+    );
+    if (duplicateMatches.length && !force) {
+      setLocationDuplicateMatches(duplicateMatches);
+      notify(
+        'Encontrei local(is) parecido(s). Confira antes de cadastrar novamente.',
+        'info',
+      );
+      return;
+    }
     setLocations((current) =>
       current.some((location) => location.id === record.id)
         ? current.map((location) =>
@@ -1117,6 +1617,7 @@ export default function Home() {
           )
         : [record, ...current],
     );
+    setLocationDuplicateMatches([]);
     setShowLocationForm(false);
     notify(
       locationDraft.id ? 'Local atualizado.' : 'Local cadastrado.',
@@ -1141,6 +1642,200 @@ export default function Home() {
         : 'Pessoa reativada.',
       'success',
     );
+  }
+  function saveDailyPlanSnapshot(
+    assignments: OperationAssignment[],
+    originalAssignments: OperationAssignment[],
+    analysis: OperationAnalysis | null,
+    decisions = planningDecisions,
+  ) {
+    const plan: DailyPlan = {
+      id: `plan-${planningDate}`,
+      date: planningDate,
+      assignments: assignments.map((assignment) => ({ ...assignment })),
+      originalAssignments: originalAssignments.map((assignment) => ({
+        ...assignment,
+      })),
+      analysis,
+      priority: planningPriority,
+      maxDistanceKm: toNumber(planningMaxDistance),
+      maxMinutes: toNumber(planningMaxMinutes),
+      decisions: decisions.map((decision) => ({ ...decision })),
+      updatedAt: new Date().toISOString(),
+    };
+    setDailyPlans((current) =>
+      current.some((item) => item.date === plan.date)
+        ? current.map((item) => (item.date === plan.date ? plan : item))
+        : [...current, plan],
+    );
+  }
+  function addPlanningAssignment() {
+    const usedPeople = new Set(
+      planningAssignments.map((item) => item.personId),
+    );
+    const person =
+      activePeople.find((item) => !usedPeople.has(item.id)) ?? activePeople[0];
+    const location =
+      activeLocations[
+        planningAssignments.length % Math.max(activeLocations.length, 1)
+      ];
+    const next = [
+      ...planningAssignments,
+      {
+        id: makeId('assignment'),
+        personId: person?.id || '',
+        locationId: location?.id || '',
+        time: '',
+      },
+    ];
+    setPlanningAssignments(next);
+    setPlanningAnalysis(null);
+    if (!planningOriginalAssignments.length)
+      setPlanningOriginalAssignments(next.map((item) => ({ ...item })));
+    saveDailyPlanSnapshot(
+      next,
+      planningOriginalAssignments.length ? planningOriginalAssignments : next,
+      null,
+    );
+  }
+  function mountPlanning() {
+    if (!activePeople.length || !activeLocations.length) {
+      notify(
+        'Cadastre pelo menos uma pessoa e um local ativo para montar o dia.',
+        'error',
+      );
+      return;
+    }
+    const next = activePeople.map((person, index) => ({
+      id: makeId('assignment'),
+      personId: person.id,
+      locationId: activeLocations[index % activeLocations.length].id,
+      time: '',
+    }));
+    setPlanningAssignments(next);
+    setPlanningOriginalAssignments(next.map((item) => ({ ...item })));
+    setPlanningAnalysis(null);
+    saveDailyPlanSnapshot(next, next, null);
+    notify(`${next.length} pessoa(s) distribuída(s) para análise.`, 'success');
+  }
+  function updatePlanningAssignment(
+    id: string,
+    field: 'personId' | 'locationId' | 'time',
+    value: string,
+  ) {
+    const next = planningAssignments.map((assignment) =>
+      assignment.id === id ? { ...assignment, [field]: value } : assignment,
+    );
+    setPlanningAssignments(next);
+    setPlanningAnalysis(null);
+    saveDailyPlanSnapshot(
+      next,
+      planningOriginalAssignments.length ? planningOriginalAssignments : next,
+      null,
+    );
+  }
+  function removePlanningAssignment(id: string) {
+    const next = planningAssignments.filter(
+      (assignment) => assignment.id !== id,
+    );
+    setPlanningAssignments(next);
+    setPlanningAnalysis(null);
+    saveDailyPlanSnapshot(next, planningOriginalAssignments, null);
+  }
+  function analyzePlanning() {
+    if (!planningAssignments.length) {
+      notify(
+        'Monte a programação ou adicione uma atribuição antes de analisar.',
+        'error',
+      );
+      return;
+    }
+    const original = planningOriginalAssignments.length
+      ? planningOriginalAssignments
+      : planningAssignments.map((assignment) => ({ ...assignment }));
+    const analysis = analyzeOperation({
+      assignments: planningAssignments,
+      people: activePeople,
+      locations: activeLocations,
+      priority: planningPriority,
+      maxDistanceKm: toNumber(planningMaxDistance),
+      maxMinutes: toNumber(planningMaxMinutes),
+    });
+    setPlanningOriginalAssignments(original);
+    setPlanningAnalysis(analysis);
+    saveDailyPlanSnapshot(planningAssignments, original, analysis);
+    notify(
+      analysis.status === 'coherent'
+        ? 'Programação coerente com os dados disponíveis.'
+        : 'Análise concluída: há pontos para revisar.',
+      analysis.status === 'coherent' ? 'success' : 'info',
+    );
+  }
+  function applyPlanningSuggestion(suggestion: OperationSuggestion) {
+    const nextAssignments = applyOperationSuggestion(
+      planningAssignments,
+      suggestion,
+    );
+    const analysis = analyzeOperation({
+      assignments: nextAssignments,
+      people: activePeople,
+      locations: activeLocations,
+      priority: planningPriority,
+      maxDistanceKm: toNumber(planningMaxDistance),
+      maxMinutes: toNumber(planningMaxMinutes),
+    });
+    const nextDecisions = [
+      ...planningDecisions,
+      {
+        id: makeId('decision'),
+        suggestionId: suggestion.id,
+        decision: 'APLICADA' as const,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    setPlanningDecisions(nextDecisions);
+    setPlanningAssignments(nextAssignments);
+    setPlanningAnalysis(analysis);
+    saveDailyPlanSnapshot(
+      nextAssignments,
+      planningOriginalAssignments,
+      analysis,
+      nextDecisions,
+    );
+    notify(
+      'Sugestão aplicada. O mapa e os indicadores foram recalculados.',
+      'success',
+    );
+  }
+  function ignorePlanningSuggestion(suggestion: OperationSuggestion) {
+    const nextDecisions = [
+      ...planningDecisions,
+      {
+        id: makeId('decision'),
+        suggestionId: suggestion.id,
+        decision: 'IGNORADA' as const,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    setPlanningDecisions(nextDecisions);
+    saveDailyPlanSnapshot(
+      planningAssignments,
+      planningOriginalAssignments,
+      planningAnalysis,
+      nextDecisions,
+    );
+    setPlanningIgnoredSuggestionIds((current) => [...current, suggestion.id]);
+    notify('Sugestão ignorada; a programação original foi mantida.', 'info');
+  }
+  function restoreOriginalPlanning() {
+    if (!planningOriginalAssignments.length) return;
+    const restored = planningOriginalAssignments.map((assignment) => ({
+      ...assignment,
+    }));
+    setPlanningAssignments(restored);
+    setPlanningAnalysis(null);
+    saveDailyPlanSnapshot(restored, restored, null);
+    notify('Programação original restaurada.', 'success');
   }
   function startSchedule() {
     const next = emptySchedule();
@@ -1168,6 +1863,22 @@ export default function Home() {
     setRoutePlan(null);
     setRouteDirty(true);
     setIgnoredSuggestion(false);
+    navigate('schedule');
+  }
+  function startScheduleForLocation(location: BoardingLocation) {
+    const next = emptySchedule();
+    Object.assign(next, {
+      locationId: location.id,
+      destinationName: location.name,
+      destinationAddress: addressOf(location),
+      destinationCity: location.city,
+      destinationUf: location.uf,
+      destinationLat: location.lat,
+      destinationLng: location.lng,
+    });
+    setScheduleDraft(next);
+    setRoutePlan(null);
+    setRouteDirty(true);
     navigate('schedule');
   }
   function openSchedule(schedule: Schedule, duplicate = false) {
@@ -1313,6 +2024,17 @@ export default function Home() {
       current.some((item) => item.id === record.id)
         ? current.map((item) => (item.id === record.id ? record : item))
         : [record, ...current],
+    );
+    setLocations((current) =>
+      current.map((location) =>
+        location.id === record.locationId
+          ? {
+              ...location,
+              usageCount: (location.usageCount || 0) + 1,
+              lastUsedAt: new Date().toISOString(),
+            }
+          : location,
+      ),
     );
     setScheduleDraft(record);
     notify('Programação salva e mapa atualizado.', 'success');
@@ -1531,7 +2253,10 @@ export default function Home() {
             <input
               value={personDraft.name}
               onChange={(event) =>
-                setPersonDraft({ ...personDraft, name: event.target.value })
+                setPersonDraft((current) => ({
+                  ...current,
+                  name: event.target.value,
+                }))
               }
             />
           </Field>
@@ -1539,7 +2264,10 @@ export default function Home() {
             <input
               value={personDraft.phone}
               onChange={(event) =>
-                setPersonDraft({ ...personDraft, phone: event.target.value })
+                setPersonDraft((current) => ({
+                  ...current,
+                  phone: event.target.value,
+                }))
               }
             />
           </Field>
@@ -1547,7 +2275,10 @@ export default function Home() {
             <input
               value={personDraft.cpf}
               onChange={(event) =>
-                setPersonDraft({ ...personDraft, cpf: event.target.value })
+                setPersonDraft((current) => ({
+                  ...current,
+                  cpf: event.target.value,
+                }))
               }
             />
           </Field>
@@ -1555,7 +2286,10 @@ export default function Home() {
             <input
               value={personDraft.city}
               onChange={(event) =>
-                setPersonDraft({ ...personDraft, city: event.target.value })
+                setPersonDraft((current) => ({
+                  ...current,
+                  city: event.target.value,
+                }))
               }
             />
           </Field>
@@ -1564,10 +2298,10 @@ export default function Home() {
               maxLength={2}
               value={personDraft.uf}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   uf: event.target.value.toUpperCase(),
-                })
+                }))
               }
             />
           </Field>
@@ -1575,7 +2309,10 @@ export default function Home() {
             <input
               value={personDraft.address}
               onChange={(event) =>
-                setPersonDraft({ ...personDraft, address: event.target.value })
+                setPersonDraft((current) => ({
+                  ...current,
+                  address: event.target.value,
+                }))
               }
             />
           </Field>
@@ -1583,7 +2320,10 @@ export default function Home() {
             <input
               value={personDraft.number}
               onChange={(event) =>
-                setPersonDraft({ ...personDraft, number: event.target.value })
+                setPersonDraft((current) => ({
+                  ...current,
+                  number: event.target.value,
+                }))
               }
             />
           </Field>
@@ -1591,10 +2331,10 @@ export default function Home() {
             <input
               value={personDraft.neighborhood}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   neighborhood: event.target.value,
-                })
+                }))
               }
             />
           </Field>
@@ -1612,10 +2352,10 @@ export default function Home() {
                 onChange={(event) => {
                   setPersonCepState('idle');
                   setPersonCepMessage('');
-                  setPersonDraft({
-                    ...personDraft,
+                  setPersonDraft((current) => ({
+                    ...current,
                     cep: formatCep(event.target.value),
-                  });
+                  }));
                 }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
@@ -1647,10 +2387,10 @@ export default function Home() {
             <input
               value={personDraft.complement}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   complement: event.target.value,
-                })
+                }))
               }
             />
           </Field>
@@ -1658,10 +2398,10 @@ export default function Home() {
             <input
               value={personDraft.reference}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   reference: event.target.value,
-                })
+                }))
               }
             />
           </Field>
@@ -1669,10 +2409,10 @@ export default function Home() {
             <input
               value={personDraft.currentLocation}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   currentLocation: event.target.value,
-                })
+                }))
               }
               placeholder="Londrina - PR"
             />
@@ -1681,10 +2421,10 @@ export default function Home() {
             <input
               value={personDraft.supervisor}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   supervisor: event.target.value,
-                })
+                }))
               }
             />
           </Field>
@@ -1692,10 +2432,10 @@ export default function Home() {
             <select
               value={personDraft.operationalStatus}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   operationalStatus: event.target.value as OperationalStatus,
-                })
+                }))
               }
             >
               {OPERATIONAL_STATUSES.map((status) => (
@@ -1708,10 +2448,10 @@ export default function Home() {
               inputMode="decimal"
               value={personDraft.lat ?? ''}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   lat: toNumber(event.target.value),
-                })
+                }))
               }
             />
           </Field>
@@ -1720,10 +2460,10 @@ export default function Home() {
               inputMode="decimal"
               value={personDraft.lng ?? ''}
               onChange={(event) =>
-                setPersonDraft({
-                  ...personDraft,
+                setPersonDraft((current) => ({
+                  ...current,
                   lng: toNumber(event.target.value),
-                })
+                }))
               }
             />
           </Field>
@@ -1732,7 +2472,10 @@ export default function Home() {
               rows={3}
               value={personDraft.notes}
               onChange={(event) =>
-                setPersonDraft({ ...personDraft, notes: event.target.value })
+                setPersonDraft((current) => ({
+                  ...current,
+                  notes: event.target.value,
+                }))
               }
             />
           </Field>
@@ -1799,7 +2542,11 @@ export default function Home() {
             <input
               value={locationDraft.name}
               onChange={(event) =>
-                setLocationDraft({ ...locationDraft, name: event.target.value })
+                setLocationDraft((current) => ({
+                  ...current,
+                  name: event.target.value,
+                  normalizedName: normalizeText(event.target.value),
+                }))
               }
             />
           </Field>
@@ -1807,7 +2554,10 @@ export default function Home() {
             <select
               value={locationDraft.type}
               onChange={(event) =>
-                setLocationDraft({ ...locationDraft, type: event.target.value })
+                setLocationDraft((current) => ({
+                  ...current,
+                  type: event.target.value,
+                }))
               }
             >
               {LOCATION_TYPES.map((type) => (
@@ -1819,7 +2569,10 @@ export default function Home() {
             <input
               value={locationDraft.city}
               onChange={(event) =>
-                setLocationDraft({ ...locationDraft, city: event.target.value })
+                setLocationDraft((current) => ({
+                  ...current,
+                  city: event.target.value,
+                }))
               }
             />
           </Field>
@@ -1828,10 +2581,10 @@ export default function Home() {
               maxLength={2}
               value={locationDraft.uf}
               onChange={(event) =>
-                setLocationDraft({
-                  ...locationDraft,
+                setLocationDraft((current) => ({
+                  ...current,
                   uf: event.target.value.toUpperCase(),
-                })
+                }))
               }
             />
           </Field>
@@ -1839,10 +2592,10 @@ export default function Home() {
             <input
               value={locationDraft.address}
               onChange={(event) =>
-                setLocationDraft({
-                  ...locationDraft,
+                setLocationDraft((current) => ({
+                  ...current,
                   address: event.target.value,
-                })
+                }))
               }
             />
           </Field>
@@ -1850,10 +2603,10 @@ export default function Home() {
             <input
               value={locationDraft.number}
               onChange={(event) =>
-                setLocationDraft({
-                  ...locationDraft,
+                setLocationDraft((current) => ({
+                  ...current,
                   number: event.target.value,
-                })
+                }))
               }
             />
           </Field>
@@ -1861,10 +2614,10 @@ export default function Home() {
             <input
               value={locationDraft.neighborhood}
               onChange={(event) =>
-                setLocationDraft({
-                  ...locationDraft,
+                setLocationDraft((current) => ({
+                  ...current,
                   neighborhood: event.target.value,
-                })
+                }))
               }
             />
           </Field>
@@ -1882,10 +2635,10 @@ export default function Home() {
                 onChange={(event) => {
                   setLocationCepState('idle');
                   setLocationCepMessage('');
-                  setLocationDraft({
-                    ...locationDraft,
+                  setLocationDraft((current) => ({
+                    ...current,
                     cep: formatCep(event.target.value),
-                  });
+                  }));
                 }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
@@ -1917,11 +2670,85 @@ export default function Home() {
             <input
               value={locationDraft.complement}
               onChange={(event) =>
-                setLocationDraft({
-                  ...locationDraft,
+                setLocationDraft((current) => ({
+                  ...current,
                   complement: event.target.value,
-                })
+                }))
               }
+            />
+          </Field>
+          {locationDraft.type === 'Outro' && (
+            <Field label="Descreva o tipo" className="span-2">
+              <input
+                value={locationDraft.typeDescription}
+                onChange={(event) =>
+                  setLocationDraft((current) => ({
+                    ...current,
+                    typeDescription: event.target.value,
+                  }))
+                }
+                placeholder="Ex.: Pátio de apoio"
+              />
+            </Field>
+          )}
+          <Field label="Descrição do local" className="span-2">
+            <input
+              value={locationDraft.description}
+              onChange={(event) =>
+                setLocationDraft((current) => ({
+                  ...current,
+                  description: event.target.value,
+                }))
+              }
+              placeholder="Referência para a equipe"
+            />
+          </Field>
+          <Field label="Instruções de acesso" className="span-2">
+            <textarea
+              rows={2}
+              value={locationDraft.accessInstructions}
+              onChange={(event) =>
+                setLocationDraft((current) => ({
+                  ...current,
+                  accessInstructions: event.target.value,
+                }))
+              }
+              placeholder="Portaria, docas, entrada rural, cuidados..."
+            />
+          </Field>
+          <Field label="Contato no local">
+            <input
+              value={locationDraft.contactName}
+              onChange={(event) =>
+                setLocationDraft((current) => ({
+                  ...current,
+                  contactName: event.target.value,
+                }))
+              }
+            />
+          </Field>
+          <Field label="Telefone / WhatsApp">
+            <input
+              value={locationDraft.contactPhone}
+              onChange={(event) =>
+                setLocationDraft((current) => ({
+                  ...current,
+                  contactPhone: event.target.value,
+                  contactWhatsapp: event.target.value,
+                }))
+              }
+            />
+          </Field>
+          <Field label="Horário de atendimento" className="span-2">
+            <input
+              value={locationDraft.openingHours}
+              onChange={(event) =>
+                setLocationDraft((current) => ({
+                  ...current,
+                  openingHours: event.target.value,
+                }))
+              }
+              placeholder="Ex.: 07:00 - 18:00"
             />
           </Field>
           <Field label="Latitude" hint="Necessária para a rota">
@@ -1929,10 +2756,12 @@ export default function Home() {
               inputMode="decimal"
               value={locationDraft.lat ?? ''}
               onChange={(event) =>
-                setLocationDraft({
-                  ...locationDraft,
+                setLocationDraft((current) => ({
+                  ...current,
                   lat: toNumber(event.target.value),
-                })
+                  locationQuality: 'approximate',
+                  locationConfirmed: false,
+                }))
               }
             />
           </Field>
@@ -1941,10 +2770,12 @@ export default function Home() {
               inputMode="decimal"
               value={locationDraft.lng ?? ''}
               onChange={(event) =>
-                setLocationDraft({
-                  ...locationDraft,
+                setLocationDraft((current) => ({
+                  ...current,
                   lng: toNumber(event.target.value),
-                })
+                  locationQuality: 'approximate',
+                  locationConfirmed: false,
+                }))
               }
             />
           </Field>
@@ -1953,45 +2784,146 @@ export default function Home() {
               rows={3}
               value={locationDraft.notes}
               onChange={(event) =>
-                setLocationDraft({
-                  ...locationDraft,
+                setLocationDraft((current) => ({
+                  ...current,
                   notes: event.target.value,
-                })
+                }))
               }
             />
           </Field>
+          <label className="check-field">
+            <input
+              type="checkbox"
+              checked={locationDraft.favorite}
+              onChange={(event) =>
+                setLocationDraft((current) => ({
+                  ...current,
+                  favorite: event.target.checked,
+                }))
+              }
+            />
+            <span>
+              <Star size={15} /> Marcar como favorito / mais usado
+            </span>
+          </label>
+          <label className="check-field">
+            <input
+              type="checkbox"
+              checked={locationDraft.active}
+              onChange={(event) =>
+                setLocationDraft((current) => ({
+                  ...current,
+                  active: event.target.checked,
+                }))
+              }
+            />
+            <span>Local ativo para novas programações</span>
+          </label>
         </div>
         <div className="location-helper">
           <div>
             <MapPin size={18} />
             <span>
-              <strong>Localização no mapa</strong>
+              <strong>
+                Localização no mapa ·{' '}
+                {locationQualityOf(locationDraft) === 'confirmed'
+                  ? 'confirmada'
+                  : locationQualityOf(locationDraft) === 'approximate'
+                    ? 'aproximada'
+                    : 'pendente'}
+              </strong>
               <small>
-                Informe coordenadas para posicionar o local sem depender de uma
-                API.
+                O endereço pode ser manual. A coordenada só entra na rota depois
+                de conferida pela operação.
               </small>
             </span>
           </div>
           <button
             type="button"
             className="button button-ghost"
-            onClick={locateNotice}
+            onClick={() => void searchLocationGeocode()}
+            disabled={locationGeocodeState === 'loading'}
           >
-            Localizar endereço
+            <Search size={15} />{' '}
+            {locationGeocodeState === 'loading'
+              ? 'Buscando...'
+              : 'Buscar endereço'}
           </button>
         </div>
+        {locationGeocodeMessage && (
+          <p
+            className={`cep-feedback ${locationGeocodeState}`}
+            aria-live="polite"
+          >
+            {locationGeocodeMessage}
+          </p>
+        )}
+        {locationGeocodeSuggestions.length > 0 && (
+          <div className="geocode-suggestions">
+            <strong>Resultados para confirmar</strong>
+            {locationGeocodeSuggestions.map((result) => (
+              <button
+                type="button"
+                key={`${result.lat}-${result.lng}`}
+                onClick={() => selectLocationGeocode(result)}
+              >
+                <MapPin size={14} />
+                <span>{result.displayName}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <RealMap
+          points={[]}
+          title="Marcar local no mapa"
+          pickerValue={{ lat: locationDraft.lat, lng: locationDraft.lng }}
+          onPickerChange={(value) =>
+            setLocationDraft((current) => ({
+              ...current,
+              lat: value.lat,
+              lng: value.lng,
+              locationQuality: 'approximate',
+              locationConfirmed: false,
+              locationConfirmationSource: 'OpenStreetMap · ajuste manual',
+            }))
+          }
+          onConfirm={confirmLocationCoordinates}
+        />
+        {locationDuplicateMatches.length > 0 && (
+          <div className="duplicate-warning" role="alert">
+            <AlertTriangle size={17} />
+            <div>
+              <strong>Local parecido encontrado</strong>
+              <p>
+                {locationDuplicateMatches
+                  .map((item) => `${item.name} · ${item.city}`)
+                  .join(' | ')}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button button-secondary"
+              onClick={() => saveLocation(true)}
+            >
+              Cadastrar mesmo assim
+            </button>
+          </div>
+        )}
         <div className="editor-actions">
           <button
             type="button"
             className="button button-secondary"
-            onClick={() => setShowLocationForm(false)}
+            onClick={() => {
+              setLocationDuplicateMatches([]);
+              setShowLocationForm(false);
+            }}
           >
             Cancelar
           </button>
           <button
             type="button"
             className="button button-primary"
-            onClick={saveLocation}
+            onClick={() => saveLocation()}
           >
             <Check size={16} /> Salvar local
           </button>
@@ -2489,6 +3421,8 @@ export default function Home() {
               className="button button-primary"
               onClick={() => {
                 setLocationDraft(emptyLocation());
+                setLocationGeocodeSuggestions([]);
+                setLocationDuplicateMatches([]);
                 setShowLocationForm(true);
               }}
             >
@@ -2522,6 +3456,11 @@ export default function Home() {
                     <div className="location-card-head">
                       <div>
                         <Badge tone="olive">{location.type}</Badge>
+                        {location.favorite && (
+                          <Badge tone="gold">
+                            <Star size={12} /> Favorito
+                          </Badge>
+                        )}
                         <h3>{location.name}</h3>
                       </div>
                       <Badge tone={location.active ? 'active' : 'inactive'}>
@@ -2531,9 +3470,12 @@ export default function Home() {
                     <p>{addressOf(location)}</p>
                     <div className="location-meta">
                       <span>
-                        {location.lat != null && location.lng != null ? (
+                        {locationQualityOf(location) !== 'missing' ? (
                           <>
-                            <LocateFixed size={14} /> Coordenadas salvas
+                            <LocateFixed size={14} />{' '}
+                            {locationQualityOf(location) === 'confirmed'
+                              ? 'Coordenadas confirmadas'
+                              : 'Coordenadas aproximadas'}
                           </>
                         ) : (
                           <>
@@ -2542,10 +3484,23 @@ export default function Home() {
                         )}
                       </span>
                       <span>
-                        <Layers3 size={14} /> Reutilizável
+                        <Layers3 size={14} /> Usado {location.usageCount || 0}{' '}
+                        vez(es)
                       </span>
+                      {location.openingHours && (
+                        <span>
+                          <Clock3 size={14} /> {location.openingHours}
+                        </span>
+                      )}
                     </div>
                     <div className="location-card-actions">
+                      <button
+                        type="button"
+                        className="button button-ghost"
+                        onClick={() => startScheduleForLocation(location)}
+                      >
+                        <CalendarDays size={15} /> Programar embarque
+                      </button>
                       <button
                         type="button"
                         className="button button-ghost"
@@ -2566,6 +3521,8 @@ export default function Home() {
                         className="button button-ghost"
                         onClick={() => {
                           setLocationDraft({ ...location });
+                          setLocationGeocodeSuggestions([]);
+                          setLocationDuplicateMatches([]);
                           setShowLocationForm(true);
                         }}
                       >
@@ -2587,6 +3544,8 @@ export default function Home() {
                   className="button button-secondary"
                   onClick={() => {
                     setLocationDraft(emptyLocation());
+                    setLocationGeocodeSuggestions([]);
+                    setLocationDuplicateMatches([]);
                     setShowLocationForm(true);
                   }}
                 >
@@ -2837,10 +3796,10 @@ export default function Home() {
                     type="date"
                     value={scheduleDraft.date}
                     onChange={(event) => {
-                      setScheduleDraft({
-                        ...scheduleDraft,
+                      setScheduleDraft((current) => ({
+                        ...current,
                         date: event.target.value,
-                      });
+                      }));
                       setRouteDirty(true);
                     }}
                   />
@@ -2850,10 +3809,10 @@ export default function Home() {
                     type="time"
                     value={scheduleDraft.time}
                     onChange={(event) => {
-                      setScheduleDraft({
-                        ...scheduleDraft,
+                      setScheduleDraft((current) => ({
+                        ...current,
                         time: event.target.value,
-                      });
+                      }));
                       setRouteDirty(true);
                     }}
                   />
@@ -2875,10 +3834,10 @@ export default function Home() {
                   <input
                     value={scheduleDraft.description}
                     onChange={(event) =>
-                      setScheduleDraft({
-                        ...scheduleDraft,
+                      setScheduleDraft((current) => ({
+                        ...current,
                         description: event.target.value,
-                      })
+                      }))
                     }
                     placeholder="Ex.: Embarque equipe comercial"
                   />
@@ -2888,10 +3847,10 @@ export default function Home() {
                     rows={2}
                     value={scheduleDraft.notes}
                     onChange={(event) =>
-                      setScheduleDraft({
-                        ...scheduleDraft,
+                      setScheduleDraft((current) => ({
+                        ...current,
                         notes: event.target.value,
-                      })
+                      }))
                     }
                   />
                 </Field>
@@ -2914,10 +3873,10 @@ export default function Home() {
                     max={180}
                     value={scheduleDraft.arrivalLeadMinutes}
                     onChange={(event) => {
-                      setScheduleDraft({
-                        ...scheduleDraft,
+                      setScheduleDraft((current) => ({
+                        ...current,
                         arrivalLeadMinutes: Number(event.target.value),
-                      });
+                      }));
                       setRouteDirty(true);
                     }}
                   />
@@ -2929,10 +3888,10 @@ export default function Home() {
                     max={60}
                     value={scheduleDraft.stopBufferMinutes}
                     onChange={(event) => {
-                      setScheduleDraft({
-                        ...scheduleDraft,
+                      setScheduleDraft((current) => ({
+                        ...current,
                         stopBufferMinutes: Number(event.target.value),
-                      });
+                      }));
                       setRouteDirty(true);
                     }}
                   />
@@ -3222,12 +4181,11 @@ export default function Home() {
               )}
             </section>
             {dest && (
-              <MiniMap
+              <RealMap
+                key={`schedule-map-${dest.id}-${routePoints.map((point) => point.id).join('-')}`}
                 points={routePoints}
                 destination={dest}
                 title="Mapa da programação"
-                zoom={mapZoom}
-                onZoom={setMapZoom}
               />
             )}
           </div>
@@ -3332,7 +4290,17 @@ export default function Home() {
   }
 
   function renderRoutesPage() {
-    const mapPoints = operationMarkers.map((marker) => toPoint(marker.person));
+    const mapPoints = [
+      ...operationMarkers.map((marker) => toPoint(marker.person)),
+      ...activeLocations.map((location) => ({
+        id: `location-${location.id}`,
+        label: location.name,
+        address: addressOf(location),
+        city: location.city,
+        lat: location.lat ?? undefined,
+        lng: location.lng ?? undefined,
+      })),
+    ];
     const filters = (
       <div className={`map-filters ${showMapFilters ? 'open' : ''}`}>
         <div className="map-filter-head">
@@ -3447,13 +4415,11 @@ export default function Home() {
                 <Activity size={13} /> Atualização manual
               </Badge>
             </div>
-            <MiniMap
+            <RealMap
+              key={`operation-map-${operationMarkers.map((marker) => marker.person.id).join('-')}`}
               points={mapPoints}
               title="Mapa da operação"
-              selectedId={selectedMarkerId}
               onSelect={setSelectedMarkerId}
-              zoom={mapZoom}
-              onZoom={setMapZoom}
             />
             {selectedMarker && (
               <div className="selected-marker-card">
@@ -3666,6 +4632,379 @@ export default function Home() {
               </p>
             </section>
           </aside>
+        </div>
+      </>
+    );
+  }
+
+  function renderPlanningPage() {
+    const visibleSuggestions =
+      planningAnalysis?.suggestions.filter(
+        (suggestion) => !planningIgnoredSuggestionIds.includes(suggestion.id),
+      ) ?? [];
+    const planningMapPoints = [
+      ...planningAssignments
+        .map((assignment) =>
+          activePeople.find((person) => person.id === assignment.personId),
+        )
+        .filter((person): person is Person => Boolean(person))
+        .map(toPoint),
+      ...activeLocations.map((location) => ({
+        id: `location-${location.id}`,
+        label: location.name,
+        address: addressOf(location),
+        city: location.city,
+        lat: location.lat ?? undefined,
+        lng: location.lng ?? undefined,
+      })),
+    ];
+    return (
+      <>
+        <SectionTitle
+          eyebrow="INTELIGÊNCIA OPERACIONAL"
+          title="Planejamento do dia"
+          text="Distribua pessoas e locais, analise a operação completa e decida quais ajustes realmente serão aplicados."
+          action={
+            <div className="title-actions">
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={restoreOriginalPlanning}
+                disabled={!planningOriginalAssignments.length}
+              >
+                <History size={16} /> Restaurar original
+              </button>
+              <button
+                type="button"
+                className="button button-primary"
+                onClick={analyzePlanning}
+              >
+                <Sparkles size={16} /> Analisar programação
+              </button>
+            </div>
+          }
+        />
+        <section className="card planning-config-card">
+          <div className="planning-config-grid">
+            <Field label="Data da operação">
+              <input
+                type="date"
+                value={planningDate}
+                onChange={(event) => setPlanningDate(event.target.value)}
+              />
+            </Field>
+            <Field label="Prioridade">
+              <select
+                value={planningPriority}
+                onChange={(event) =>
+                  setPlanningPriority(event.target.value as OperationPriority)
+                }
+              >
+                <option value="balanced">Equilibrado · km + tempo</option>
+                <option value="km">Menor distância</option>
+                <option value="time">Menor tempo</option>
+              </select>
+            </Field>
+            <Field label="Alerta de distância (km)">
+              <input
+                inputMode="decimal"
+                value={planningMaxDistance}
+                onChange={(event) => setPlanningMaxDistance(event.target.value)}
+                placeholder="Sem limite"
+              />
+            </Field>
+            <Field label="Alerta de tempo (min)">
+              <input
+                inputMode="numeric"
+                value={planningMaxMinutes}
+                onChange={(event) => setPlanningMaxMinutes(event.target.value)}
+                placeholder="Sem limite"
+              />
+            </Field>
+          </div>
+          <div className="planning-actions">
+            <div>
+              <p className="eyebrow">{longDate(planningDate)}</p>
+              <strong>
+                {planningAssignments.length} atribuição(ões) ·{' '}
+                {activePeople.length} pessoa(s) ativas ·{' '}
+                {activeLocations.length} local(is) ativos
+              </strong>
+            </div>
+            <div className="title-actions">
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={addPlanningAssignment}
+              >
+                <Plus size={16} /> Adicionar linha
+              </button>
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={mountPlanning}
+              >
+                <Zap size={16} /> Montar com todos
+              </button>
+            </div>
+          </div>
+        </section>
+        <div className="planning-layout">
+          <section className="card planning-assignments-card">
+            <div className="card-heading">
+              <div>
+                <p className="eyebrow">01 · ATRIBUIÇÕES</p>
+                <h2>Pessoa → destino</h2>
+              </div>
+              <Badge tone="olive">Decisão manual</Badge>
+            </div>
+            <p className="small-copy">
+              A análise considera distância, tempo estimado, horários,
+              disponibilidade, coordenadas faltantes e cruzamentos. Nada é
+              alterado automaticamente.
+            </p>
+            {planningAssignments.length ? (
+              <div className="planning-assignment-list">
+                {planningAssignments.map((assignment, index) => (
+                  <div className="planning-assignment-row" key={assignment.id}>
+                    <span className="planning-index">{index + 1}</span>
+                    <Field label="Pessoa">
+                      <select
+                        value={assignment.personId}
+                        onChange={(event) =>
+                          updatePlanningAssignment(
+                            assignment.id,
+                            'personId',
+                            event.target.value,
+                          )
+                        }
+                      >
+                        <option value="">Selecionar pessoa</option>
+                        {activePeople.map((person) => (
+                          <option key={person.id} value={person.id}>
+                            {person.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Destino">
+                      <select
+                        value={assignment.locationId}
+                        onChange={(event) =>
+                          updatePlanningAssignment(
+                            assignment.id,
+                            'locationId',
+                            event.target.value,
+                          )
+                        }
+                      >
+                        <option value="">Selecionar local</option>
+                        {activeLocations.map((location) => (
+                          <option key={location.id} value={location.id}>
+                            {location.name}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Horário">
+                      <input
+                        type="time"
+                        value={assignment.time || ''}
+                        onChange={(event) =>
+                          updatePlanningAssignment(
+                            assignment.id,
+                            'time',
+                            event.target.value,
+                          )
+                        }
+                      />
+                    </Field>
+                    <IconButton
+                      label="Remover atribuição"
+                      onClick={() => removePlanningAssignment(assignment.id)}
+                    >
+                      <X size={16} />
+                    </IconButton>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                icon={Clipboard}
+                title="Dia ainda não montado"
+                text="Use Montar com todos para criar uma base ou adicione linhas manualmente."
+                action={
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    onClick={mountPlanning}
+                  >
+                    <Zap size={16} /> Montar programação
+                  </button>
+                }
+              />
+            )}
+          </section>
+          <section className="card planning-health-card">
+            <div className="card-heading">
+              <div>
+                <p className="eyebrow">02 · SAÚDE DA OPERAÇÃO</p>
+                <h2>
+                  {planningAnalysis ? `${planningAnalysis.score}/100` : '—'}
+                </h2>
+              </div>
+              {planningAnalysis && (
+                <Badge
+                  tone={
+                    planningAnalysis.status === 'coherent' ? 'active' : 'gold'
+                  }
+                >
+                  {planningAnalysis.status === 'coherent'
+                    ? 'Coerente'
+                    : 'Ajustes recomendados'}
+                </Badge>
+              )}
+            </div>
+            {planningAnalysis ? (
+              <>
+                <div className="planning-health-bar">
+                  <span style={{ width: `${planningAnalysis.score}%` }} />
+                </div>
+                <div className="planning-metrics">
+                  <div>
+                    <span>Distância</span>
+                    <strong>{formatDistance(planningAnalysis.totalKm)}</strong>
+                  </div>
+                  <div>
+                    <span>Tempo</span>
+                    <strong>
+                      {formatDuration(planningAnalysis.totalMinutes)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Conflitos</span>
+                    <strong>{planningAnalysis.conflicts.length}</strong>
+                  </div>
+                  <div>
+                    <span>Cruzamentos</span>
+                    <strong>{planningAnalysis.crossings}</strong>
+                  </div>
+                </div>
+                <div className="planning-factors">
+                  {planningAnalysis.factors.map((factor) => (
+                    <p key={factor}>
+                      <Info size={14} /> {factor}
+                    </p>
+                  ))}
+                </div>
+                <p className="planning-decision-history">
+                  <History size={14} /> {planningDecisions.length} decisão(ões)
+                  registradas para este dia.
+                </p>
+                {planningAnalysis.conflicts.length > 0 && (
+                  <div className="planning-conflicts">
+                    {planningAnalysis.conflicts.slice(0, 5).map((conflict) => (
+                      <p key={conflict}>
+                        <AlertTriangle size={14} /> {conflict}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="inline-notice">
+                <Info size={15} /> Clique em Analisar programação para medir o
+                dia.
+              </div>
+            )}
+          </section>
+        </div>
+        <div className="planning-layout">
+          <section className="card planning-suggestions-card">
+            <div className="card-heading">
+              <div>
+                <p className="eyebrow">03 · DECISÕES SUGERIDAS</p>
+                <h2>Melhores ajustes</h2>
+              </div>
+              <Badge tone="neutral">Máx. 3 sugestões</Badge>
+            </div>
+            {visibleSuggestions.length ? (
+              visibleSuggestions.map((suggestion) => {
+                const original =
+                  activePeople.find(
+                    (person) => person.id === suggestion.originalPersonId,
+                  )?.name || suggestion.originalPersonId;
+                const suggested =
+                  activePeople.find(
+                    (person) => person.id === suggestion.suggestedPersonId,
+                  )?.name || suggestion.suggestedPersonId;
+                return (
+                  <article className="planning-suggestion" key={suggestion.id}>
+                    <div>
+                      <Sparkles size={18} />
+                      <div>
+                        <strong>
+                          Trocar {original} por {suggested}
+                        </strong>
+                        <p>{suggestion.reason}</p>
+                      </div>
+                    </div>
+                    <div className="planning-suggestion-stats">
+                      <span>Economia estimada</span>
+                      <strong>
+                        {formatDistance(suggestion.economyKm)} ·{' '}
+                        {formatDuration(suggestion.economyMinutes)}
+                      </strong>
+                    </div>
+                    <div className="planning-suggestion-actions">
+                      <button
+                        type="button"
+                        className="button button-ghost"
+                        onClick={() => ignorePlanningSuggestion(suggestion)}
+                      >
+                        Ignorar
+                      </button>
+                      <button
+                        type="button"
+                        className="button button-primary"
+                        onClick={() => applyPlanningSuggestion(suggestion)}
+                      >
+                        <Check size={15} /> Aplicar e recalcular
+                      </button>
+                    </div>
+                  </article>
+                );
+              })
+            ) : (
+              <EmptyState
+                icon={CircleCheck}
+                title={
+                  planningAnalysis
+                    ? 'Nenhum ajuste pendente'
+                    : 'Aguardando análise'
+                }
+                text={
+                  planningAnalysis
+                    ? 'A programação está pronta para decisão da operação.'
+                    : 'A análise mostrará somente os melhores ajustes encontrados.'
+                }
+              />
+            )}
+          </section>
+          <section className="card planning-map-card">
+            <div className="card-heading">
+              <div>
+                <p className="eyebrow">04 · VISÃO ESPACIAL</p>
+                <h2>Operação no mapa</h2>
+              </div>
+              <MapIcon size={18} />
+            </div>
+            <RealMap
+              key={`planning-map-${planningAssignments.map((item) => `${item.personId}-${item.locationId}`).join('-')}`}
+              points={planningMapPoints}
+              title="Pessoas e locais do dia"
+            />
+          </section>
         </div>
       </>
     );
@@ -3948,6 +5287,7 @@ export default function Home() {
     if (view === 'locations') return renderLocationsPage();
     if (view === 'schedule') return renderSchedulePage();
     if (view === 'routes') return renderRoutesPage();
+    if (view === 'planning') return renderPlanningPage();
     if (view === 'history') return renderHistoryPage();
     return renderDashboard();
   }

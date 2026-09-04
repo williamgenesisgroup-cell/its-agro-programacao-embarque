@@ -4,6 +4,7 @@ export type PersistedState = {
   people: unknown[];
   locations: unknown[];
   schedules: unknown[];
+  dailyPlans?: unknown[];
   suggestions?: unknown[];
   costPerKm?: number;
 };
@@ -22,5 +23,8 @@ export function writePersistedState(state: PersistedState) {
 }
 
 export function isDevelopmentSeedAllowed() {
-  return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  return (
+    window.location.hostname === 'localhost' ||
+    window.location.hostname === '127.0.0.1'
+  );
 }

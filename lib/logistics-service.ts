@@ -23,17 +23,27 @@ export function compareCandidateToDestination(
   blockedIds = new Set<string>(),
 ): SwapSuggestion | null {
   const selectedRank = selected
-    .map((candidate) => ({ candidate, leg: estimateLeg(candidate.point, destination) }))
+    .map((candidate) => ({
+      candidate,
+      leg: estimateLeg(candidate.point, destination),
+    }))
     .filter((item) => item.leg)
     .sort((a, b) => (b.leg?.distanceKm ?? 0) - (a.leg?.distanceKm ?? 0))[0];
   const suggestedRank = available
     .filter((candidate) => !blockedIds.has(candidate.id))
-    .map((candidate) => ({ candidate, leg: estimateLeg(candidate.point, destination) }))
+    .map((candidate) => ({
+      candidate,
+      leg: estimateLeg(candidate.point, destination),
+    }))
     .filter((item) => item.leg)
-    .sort((a, b) => (a.leg?.distanceKm ?? Infinity) - (b.leg?.distanceKm ?? Infinity))[0];
+    .sort(
+      (a, b) =>
+        (a.leg?.distanceKm ?? Infinity) - (b.leg?.distanceKm ?? Infinity),
+    )[0];
 
   if (!selectedRank?.leg || !suggestedRank?.leg) return null;
-  if (suggestedRank.leg.distanceKm + 60 >= selectedRank.leg.distanceKm) return null;
+  if (suggestedRank.leg.distanceKm + 60 >= selectedRank.leg.distanceKm)
+    return null;
   return {
     original: selectedRank.candidate,
     suggested: suggestedRank.candidate,

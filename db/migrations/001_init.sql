@@ -60,6 +60,44 @@ create table if not exists public.boarding_locations (
   updated_at timestamptz not null default now()
 );
 
+alter table public.boarding_locations add column if not exists description text;
+alter table public.boarding_locations add column if not exists access_instructions text;
+alter table public.boarding_locations add column if not exists contact_name text;
+alter table public.boarding_locations add column if not exists contact_phone text;
+alter table public.boarding_locations add column if not exists contact_whatsapp text;
+alter table public.boarding_locations add column if not exists opening_hours text;
+alter table public.boarding_locations add column if not exists favorite boolean not null default false;
+alter table public.boarding_locations add column if not exists usage_count integer not null default 0;
+alter table public.boarding_locations add column if not exists last_used_at timestamptz;
+alter table public.boarding_locations add column if not exists location_quality text not null default 'missing' check (location_quality in ('confirmed', 'approximate', 'missing'));
+alter table public.boarding_locations add column if not exists location_confirmed boolean not null default false;
+alter table public.boarding_locations add column if not exists location_confirmation_source text;
+alter table public.boarding_locations add column if not exists normalized_name text;
+
+create table if not exists public.boarding_location_access_points (
+  id uuid primary key default gen_random_uuid(),
+  boarding_location_id uuid not null references public.boarding_locations(id) on delete cascade,
+  name text not null,
+  access_type text,
+  address text,
+  lat numeric(10, 7),
+  lng numeric(10, 7),
+  instructions text,
+  active boolean not null default true,
+  created_by uuid references public.app_users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.location_audit_history (
+  id uuid primary key default gen_random_uuid(),
+  boarding_location_id uuid not null references public.boarding_locations(id) on delete cascade,
+  action text not null,
+  changed_fields jsonb not null default '{}'::jsonb,
+  created_by uuid references public.app_users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists public.schedules (
   id uuid primary key default gen_random_uuid(),
   boarding_location_id uuid not null references public.boarding_locations(id) on delete restrict,
@@ -134,11 +172,54 @@ create table if not exists public.suggestion_history (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.operation_plans (
+  id uuid primary key default gen_random_uuid(),
+  operation_date date not null,
+  priority text not null default 'balanced' check (priority in ('km', 'time', 'balanced')),
+  max_distance_km numeric(10, 2),
+  max_minutes integer,
+  original_snapshot jsonb not null default '[]'::jsonb,
+  analysis_snapshot jsonb,
+  health_score integer,
+  created_by uuid references public.app_users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (operation_date)
+);
+
+create table if not exists public.operation_plan_assignments (
+  id uuid primary key default gen_random_uuid(),
+  operation_plan_id uuid not null references public.operation_plans(id) on delete cascade,
+  person_id uuid references public.people(id) on delete set null,
+  boarding_location_id uuid references public.boarding_locations(id) on delete set null,
+  planned_time time,
+  assignment_order integer not null default 1,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.operation_plan_decisions (
+  id uuid primary key default gen_random_uuid(),
+  operation_plan_id uuid not null references public.operation_plans(id) on delete cascade,
+  suggestion_key text not null,
+  decision text not null check (decision in ('APLICADA', 'IGNORADA', 'MANTIDA')),
+  before_snapshot jsonb,
+  after_snapshot jsonb,
+  reason text,
+  created_by uuid references public.app_users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
 create index if not exists people_city_status_idx on public.people (city, operational_status) where active = true;
 create index if not exists people_supervisor_idx on public.people (supervisor) where active = true;
 create index if not exists schedules_date_time_idx on public.schedules (boarding_date, boarding_time);
 create index if not exists schedule_people_person_idx on public.schedule_people (person_id);
 create index if not exists suggestion_history_schedule_idx on public.suggestion_history (schedule_id, created_at desc);
+create index if not exists boarding_locations_normalized_name_idx on public.boarding_locations (normalized_name);
+create index if not exists boarding_location_access_points_location_idx on public.boarding_location_access_points (boarding_location_id) where active = true;
+create index if not exists location_audit_history_location_idx on public.location_audit_history (boarding_location_id, created_at desc);
+create index if not exists operation_plans_date_idx on public.operation_plans (operation_date desc);
+create index if not exists operation_plan_assignments_plan_idx on public.operation_plan_assignments (operation_plan_id, assignment_order);
+create index if not exists operation_plan_decisions_plan_idx on public.operation_plan_decisions (operation_plan_id, created_at desc);
 
 alter table public.app_users enable row level security;
 alter table public.people enable row level security;
@@ -148,6 +229,11 @@ alter table public.schedule_people enable row level security;
 alter table public.routes enable row level security;
 alter table public.route_stops enable row level security;
 alter table public.suggestion_history enable row level security;
+alter table public.boarding_location_access_points enable row level security;
+alter table public.location_audit_history enable row level security;
+alter table public.operation_plans enable row level security;
+alter table public.operation_plan_assignments enable row level security;
+alter table public.operation_plan_decisions enable row level security;
 
 -- O app deve autenticar o operador antes de trocar o localStorage por estas tabelas.
 -- As policies abaixo preservam isolamento por usuário e permitem administradores.
@@ -165,3 +251,13 @@ create policy "authenticated users can read route stops" on public.route_stops f
 create policy "authenticated users can write route stops" on public.route_stops for all to authenticated using (true) with check (true);
 create policy "authenticated users can read suggestions" on public.suggestion_history for select to authenticated using (true);
 create policy "authenticated users can write suggestions" on public.suggestion_history for all to authenticated using (true) with check (true);
+create policy "authenticated users can read access points" on public.boarding_location_access_points for select to authenticated using (true);
+create policy "authenticated users can write access points" on public.boarding_location_access_points for all to authenticated using (true) with check (true);
+create policy "authenticated users can read location audit" on public.location_audit_history for select to authenticated using (true);
+create policy "authenticated users can write location audit" on public.location_audit_history for all to authenticated using (true) with check (true);
+create policy "authenticated users can read operation plans" on public.operation_plans for select to authenticated using (true);
+create policy "authenticated users can write operation plans" on public.operation_plans for all to authenticated using (true) with check (true);
+create policy "authenticated users can read operation assignments" on public.operation_plan_assignments for select to authenticated using (true);
+create policy "authenticated users can write operation assignments" on public.operation_plan_assignments for all to authenticated using (true) with check (true);
+create policy "authenticated users can read operation decisions" on public.operation_plan_decisions for select to authenticated using (true);
+create policy "authenticated users can write operation decisions" on public.operation_plan_decisions for all to authenticated using (true) with check (true);

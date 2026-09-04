@@ -14,6 +14,13 @@ test('entrega os fluxos operacionais solicitados', async () => {
   assert.match(page, /Local atual/);
   assert.match(page, /compareCandidateToDestination/);
   assert.match(page, /Armazém/);
+  assert.match(page, /Silo/);
+  assert.match(page, /Descreva o tipo/);
+  assert.match(page, /Confirmar coordenadas/);
+  assert.match(page, /Planejamento do dia/);
+  assert.match(page, /Analisar programação/);
+  assert.match(page, /applyOperationSuggestion/);
+  assert.match(page, /OpenStreetMap\/Nominatim/);
   assert.match(page, /Buscar CEP/);
   assert.match(page, /viacep\.com\.br/);
   assert.match(page, /renderPersonEditor/);
@@ -43,6 +50,9 @@ test('mantém contrato de banco e publicação', async () => {
     /create table if not exists public\.suggestion_history/,
   );
   assert.match(migration, /enable row level security/);
+  assert.match(migration, /boarding_location_access_points/);
+  assert.match(migration, /operation_plans/);
+  assert.match(migration, /location_audit_history/);
   assert.match(render, /healthCheckPath: \/api\/health/);
   assert.match(render, /start:render/);
 });
