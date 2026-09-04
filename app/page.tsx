@@ -318,10 +318,8 @@ function normalizeText(value: string) {
     .replace(/\s+/g, ' ');
 }
 function locationQualityOf(location: BoardingLocation) {
-  if (location.locationQuality) return location.locationQuality;
-  return location.lat != null && location.lng != null
-    ? 'approximate'
-    : 'missing';
+  if (location.lat == null || location.lng == null) return 'missing';
+  return location.locationQuality || 'approximate';
 }
 function normalizeLocation(item: Partial<BoardingLocation>): BoardingLocation {
   const base = emptyLocation();
@@ -337,9 +335,12 @@ function normalizeLocation(item: Partial<BoardingLocation>): BoardingLocation {
     usageCount: Number(record.usageCount) || 0,
     lastUsedAt: record.lastUsedAt || '',
     locationQuality:
-      record.locationQuality ||
-      (record.lat != null && record.lng != null ? 'approximate' : 'missing'),
-    locationConfirmed: Boolean(record.locationConfirmed),
+      record.lat != null && record.lng != null
+        ? record.locationQuality || 'approximate'
+        : 'missing',
+    locationConfirmed: Boolean(
+      record.locationConfirmed && record.lat != null && record.lng != null,
+    ),
     locationConfirmationSource: record.locationConfirmationSource || '',
   };
 }
