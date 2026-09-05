@@ -6377,9 +6377,14 @@ export default function Home() {
           <div className="topbar-actions">
             <span className="environment-pill">
               <span className="online-dot" />
-              {isDevelopmentSeedAllowed()
-                ? 'Ambiente local'
-                : 'AMBIENTE DE TESTES · online'}
+              <span className="environment-label">
+                {isDevelopmentSeedAllowed()
+                  ? 'Ambiente local'
+                  : 'AMBIENTE DE TESTES · online'}
+              </span>
+              <span className="environment-short">
+                {isDevelopmentSeedAllowed() ? 'LOCAL' : 'ONLINE'}
+              </span>
             </span>
             <button
               type="button"

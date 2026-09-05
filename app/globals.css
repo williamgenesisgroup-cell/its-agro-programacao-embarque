@@ -235,6 +235,9 @@ a {
   color: var(--muted);
   font-size: 12px;
 }
+.environment-short {
+  display: none;
+}
 .user-menu {
   border: 0;
   background: transparent;
@@ -3390,6 +3393,25 @@ a {
   .topbar-actions {
     flex: 0 0 auto;
     margin-left: auto;
+  }
+  .environment-pill {
+    display: inline-flex;
+    min-width: 62px;
+    min-height: 34px;
+    justify-content: center;
+    padding: 0 8px;
+    border-radius: 9px;
+    background: #eef3eb;
+    color: var(--olive-deep);
+    font-size: 9px;
+    font-weight: 850;
+    letter-spacing: 0.03em;
+  }
+  .environment-label {
+    display: none;
+  }
+  .environment-short {
+    display: inline;
   }
   .user-menu {
     min-width: 40px;
