@@ -16,6 +16,7 @@ function gitVersion() {
 
 export default defineConfig({
   root: fileURLToPath(new URL('./render-client', import.meta.url)),
+  publicDir: fileURLToPath(new URL('./public', import.meta.url)),
   plugins: [react()],
   css: { postcss: { plugins: [tailwindcss()] } },
   resolve: {

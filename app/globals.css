@@ -2826,15 +2826,16 @@ a {
     margin-top: 22px;
   }
   .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 9px;
   }
   .intelligence-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 9px;
     margin-bottom: 20px;
   }
   .metric-card {
+    min-width: 0;
     min-height: 112px;
     padding: 13px;
   }
@@ -2844,6 +2845,12 @@ a {
   .metric-head {
     align-items: flex-start;
     font-size: 11px;
+  }
+  .metric-head > span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .metric-icon {
     width: 28px;
@@ -3504,9 +3511,17 @@ a {
     padding: 6px;
   }
   .mobile-bottom-nav button {
+    min-width: 0;
     min-height: 56px;
     padding: 5px 2px;
     font-size: 10px;
+  }
+  .mobile-bottom-nav button span {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .mobile-bottom-nav button svg {
     width: 19px;
