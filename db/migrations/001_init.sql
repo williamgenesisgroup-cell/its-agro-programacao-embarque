@@ -43,7 +43,9 @@ create table if not exists public.people (
 create table if not exists public.boarding_locations (
   id uuid primary key default gen_random_uuid(),
   name text not null,
-  location_type text not null default 'Aeroporto',
+  -- Mantido como texto para compatibilidade; a aplicação canoniza Fazenda,
+  -- Armazém e Vagão e preserva valores legados para revisão administrativa.
+  location_type text not null default 'FAZENDA',
   address text not null,
   number text,
   neighborhood text,
@@ -73,6 +75,7 @@ alter table public.boarding_locations add column if not exists location_quality 
 alter table public.boarding_locations add column if not exists location_confirmed boolean not null default false;
 alter table public.boarding_locations add column if not exists location_confirmation_source text;
 alter table public.boarding_locations add column if not exists normalized_name text;
+alter table public.boarding_locations add column if not exists wagon_number text;
 
 create table if not exists public.boarding_location_access_points (
   id uuid primary key default gen_random_uuid(),

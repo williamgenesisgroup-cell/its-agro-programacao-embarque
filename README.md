@@ -6,6 +6,7 @@ Web app operacional para cadastrar classificadores e locais, montar programaçõ
 
 - Dashboard com próximos embarques, alertas e indicadores operacionais.
 - CRUD de pessoas/classificadores e locais de embarque, com inativação sem apagar histórico.
+- Tipos oficiais de local de embarque: `FAZENDA`, `ARMAZÉM` e `VAGÃO`; entradas `VAGAO` são canonizadas para `VAGÃO`.
 - Programação por data, horário, destino, observações e pessoas selecionadas.
 - Ordenação automática por coordenadas, reordenação manual por arrastar ou botões e endereço temporário por programação.
 - Horário de coleta calculado de trás para frente, com antecedência de chegada e margem por parada.
@@ -15,6 +16,7 @@ Web app operacional para cadastrar classificadores e locais, montar programaçõ
 - WhatsApp em massa: uma única mensagem por programação, prévia, edição, cópia, modo resumido/completo e endereços opcionais.
 - Indicador de sincronização online, detecção de conflito e migração idempotente do legado local.
 - Marcadores Leaflet com SVG interno, número + nome resumido, destino identificado e snapshot do local na programação.
+- O modelo já reserva `wagonNumber`/`wagon_number` opcional para futura identificação individual de vagões, sem campo obrigatório na interface atual.
 - Layout mobile-first validável em 360, 390, 393, 412 e 430 px.
 
 ## Arquitetura

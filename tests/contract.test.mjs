@@ -15,15 +15,22 @@ void test('entrega os fluxos operacionais solicitados', async () => {
   assert.match(page, /compareCandidateToDestination/);
   const typeOptions =
     page.match(/const LOCATION_TYPES = \[([\s\S]*?)\](?: as const)?;/)?.[1] ?? '';
-  assert.match(typeOptions, /FAZENDA/);
-  assert.match(typeOptions, /ARMAZÉM/);
-  assert.doesNotMatch(typeOptions, /VAGÃO|VAGAO/);
+  const locationTypes = [...typeOptions.matchAll(/'([^']+)'/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual(locationTypes, ['FAZENDA', 'ARMAZÉM', 'VAGÃO']);
   assert.doesNotMatch(
     typeOptions,
     /Aeroporto|Rodoviária|Hotel|Empresa|Unidade|Silo|Terminal|Porto|Pátio|Filial|Ponto de encontro|Outro/,
   );
+  assert.match(page, /function canonicalLocationType/);
+  assert.match(page, /if \(rawType === 'VAGAO'\) return 'VAGÃO'/);
   assert.match(page, /Selecione/);
   assert.match(page, /locationTypeFilter/);
+  assert.match(page, /<option value="VAGÃO">Vagão<\/option>/);
+  assert.match(page, /<span>Vagões<\/span>/);
+  assert.match(page, /function locationMarkerType/);
+  assert.match(page, /return 'vagao'/);
   assert.match(page, /Enviar feedback/);
   assert.match(page, /Exportar backup/);
   assert.match(page, /AMBIENTE DE TESTES/);
@@ -66,6 +73,8 @@ void test('mantém contrato de banco e publicação', async () => {
   assert.match(migration, /boarding_location_access_points/);
   assert.match(migration, /operation_plans/);
   assert.match(migration, /location_audit_history/);
+  assert.match(migration, /location_type text not null default 'FAZENDA'/);
+  assert.match(migration, /add column if not exists wagon_number text/);
   assert.match(render, /healthCheckPath: \/api\/health/);
   assert.match(render, /start:render/);
 });

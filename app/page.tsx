@@ -142,6 +142,7 @@ type BoardingLocation = {
   id: string;
   name: string;
   type: string;
+  wagonNumber?: string;
   city: string;
   uf: string;
   address: string;
@@ -289,7 +290,7 @@ const NAV: { id: View; label: string; icon: LucideIcon }[] = [
   { id: 'history', label: 'Histórico', icon: History },
   { id: 'feedback', label: 'Enviar feedback', icon: MessageSquarePlus },
 ];
-const LOCATION_TYPES = ['FAZENDA', 'ARMAZÉM'] as const;
+const LOCATION_TYPES = ['FAZENDA', 'ARMAZÉM', 'VAGÃO'] as const;
 const APP_VERSION = (process.env.NEXT_PUBLIC_APP_VERSION || '612dc86').slice(
   0,
   7,
@@ -370,16 +371,17 @@ function locationQualityOf(location: BoardingLocation) {
   if (location.lat == null || location.lng == null) return 'missing';
   return location.locationQuality || 'approximate';
 }
+function canonicalLocationType(value: unknown) {
+  const rawType = normalizeText(textValue(value)).toUpperCase();
+  if (rawType === 'FAZENDA') return 'FAZENDA';
+  if (rawType === 'ARMAZEM') return 'ARMAZÉM';
+  if (rawType === 'VAGAO') return 'VAGÃO';
+  return rawType || '';
+}
 function normalizeLocation(item: Partial<BoardingLocation>): BoardingLocation {
   const base = emptyLocation();
   const record = { ...base, ...item };
-  const rawType = normalizeText(record.type || '').toUpperCase();
-  const type =
-    rawType === 'FAZENDA'
-      ? 'FAZENDA'
-      : rawType === 'ARMAZEM' || rawType === 'ARMAZÉM'
-        ? 'ARMAZÉM'
-        : rawType || '';
+  const type = canonicalLocationType(record.type);
   const now = new Date().toISOString();
   return {
     ...record,
@@ -411,9 +413,9 @@ function cssStatus(value: string) {
 function locationMarkerType(
   location: BoardingLocation | null,
 ): MapPoint['markerType'] {
-  const type = normalizeText(location?.type || '').toUpperCase();
+  const type = canonicalLocationType(location?.type);
   if (type === 'FAZENDA') return 'fazenda';
-  if (type === 'VAGAO' || type === 'VAGÃO') return 'vagao';
+  if (type === 'VAGÃO') return 'vagao';
   return 'armazem';
 }
 function toPoint(person: Person, sequence?: number): MapPoint {
@@ -541,6 +543,7 @@ function emptyLocation(): BoardingLocation {
     id: '',
     name: '',
     type: '',
+    wagonNumber: '',
     city: '',
     uf: 'PR',
     address: '',
@@ -3252,7 +3255,7 @@ export default function Home() {
                 locationDraft.type as (typeof LOCATION_TYPES)[number],
               ) && (
                 <small className="legacy-type-notice">
-                  Registro legado: escolha Fazenda ou Armazém para
+                  Registro legado: escolha Fazenda, Armazém ou Vagão para
                   reclassificar.
                 </small>
               )}
@@ -4142,6 +4145,9 @@ export default function Home() {
     const warehouseCount = locations.filter(
       (location) => location.type === 'ARMAZÉM',
     ).length;
+    const wagonCount = locations.filter(
+      (location) => location.type === 'VAGÃO',
+    ).length;
     const legacyCount = locations.filter(
       (location) =>
         !LOCATION_TYPES.includes(
@@ -4183,12 +4189,16 @@ export default function Home() {
             <span>Armazéns</span>
             <strong>{warehouseCount}</strong>
           </div>
+          <div className="location-overview-stat">
+            <span>Vagões</span>
+            <strong>{wagonCount}</strong>
+          </div>
         </section>
         {legacyCount > 0 && (
           <p className="legacy-type-notice">
             {legacyCount} registro(s) legado(s) mantido(s) para revisão
             administrativa. Novos cadastros e programações aceitam apenas
-            Fazenda ou Armazém.
+            Fazenda, Armazém ou Vagão.
           </p>
         )}
         <section className="card table-card">
@@ -4213,6 +4223,7 @@ export default function Home() {
               <option value="all">Todos</option>
               <option value="FAZENDA">Fazenda</option>
               <option value="ARMAZÉM">Armazém</option>
+              <option value="VAGÃO">Vagão</option>
             </select>
           </div>
           {visibleLocations.length ? (
@@ -4236,8 +4247,8 @@ export default function Home() {
                           location.type as (typeof LOCATION_TYPES)[number],
                         ) && (
                           <small className="legacy-type-notice">
-                            Tipo anterior indisponível · edite para Fazenda ou
-                            Armazém.
+                            Tipo anterior indisponível · edite para Fazenda,
+                            Armazém ou Vagão.
                           </small>
                         )}
                         {location.favorite && (
