@@ -4173,7 +4173,7 @@ export default function Home() {
         <section className="card location-overview-card">
           <div className="location-overview-stat">
             <span>Total de locais</span>
-            <strong>{locations.length}</strong>
+            <strong>{farmCount + warehouseCount}</strong>
           </div>
           <div className="location-overview-stat">
             <span>Fazendas</span>
