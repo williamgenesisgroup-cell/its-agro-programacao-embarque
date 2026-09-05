@@ -19,6 +19,7 @@ import {
   Clock3,
   Copy,
   Crosshair,
+  Download,
   Eye,
   FileText,
   GripVertical,
@@ -31,6 +32,7 @@ import {
   MapPin,
   Menu,
   MessageCircle,
+  MessageSquarePlus,
   Navigation,
   Star,
   Pencil,
@@ -100,7 +102,8 @@ type View =
   | 'schedule'
   | 'routes'
   | 'planning'
-  | 'history';
+  | 'history'
+  | 'feedback';
 type ScheduleStatus = 'Rascunho' | 'Programado' | 'Finalizado' | 'Cancelado';
 type OperationalStatus =
   | 'Disponível'
@@ -130,6 +133,10 @@ type Person = {
   currentLocation: string;
   lastLocationUpdate: string;
   operationalStatus: OperationalStatus;
+  createdAt?: string;
+  updatedAt?: string;
+  createdBy?: string;
+  updatedBy?: string;
 };
 type BoardingLocation = {
   id: string;
@@ -160,6 +167,10 @@ type BoardingLocation = {
   typeDescription: string;
   normalizedName: string;
   active: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+  createdBy?: string;
+  updatedBy?: string;
 };
 type SchedulePerson = RoutePoint & { sourcePersonId: string };
 type MapPoint = RoutePoint & {
@@ -214,6 +225,8 @@ type Schedule = {
   arrivalLeadMinutes: number;
   stopBufferMinutes: number;
   locationSnapshot?: LocationSnapshot;
+  updatedAt?: string;
+  updatedBy?: string;
 };
 type DailyPlan = {
   id: string;
@@ -244,6 +257,17 @@ type Comparison = {
   suggestedMin: number;
 } | null;
 type CepLookupState = 'idle' | 'loading' | 'success' | 'error';
+type FeedbackType = 'ERRO' | 'MELHORIA' | 'DÚVIDA';
+type FeedbackItem = {
+  id: string;
+  type: FeedbackType;
+  description: string;
+  currentScreen: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  updatedBy: string;
+};
 type ViaCepResult = {
   cep?: string;
   logradouro?: string;
@@ -263,8 +287,14 @@ const NAV: { id: View; label: string; icon: LucideIcon }[] = [
   { id: 'routes', label: 'Mapa da operação', icon: MapIcon },
   { id: 'planning', label: 'Planejamento do dia', icon: Clipboard },
   { id: 'history', label: 'Histórico', icon: History },
+  { id: 'feedback', label: 'Enviar feedback', icon: MessageSquarePlus },
 ];
-const LOCATION_TYPES = ['FAZENDA', 'ARMAZÉM', 'VAGÃO'];
+const LOCATION_TYPES = ['FAZENDA', 'ARMAZÉM'] as const;
+const APP_VERSION = (process.env.NEXT_PUBLIC_APP_VERSION || '612dc86').slice(
+  0,
+  7,
+);
+const OPERATION_USER = 'Operação';
 const OPERATIONAL_STATUSES: OperationalStatus[] = [
   'Disponível',
   'Programado',
@@ -349,14 +379,17 @@ function normalizeLocation(item: Partial<BoardingLocation>): BoardingLocation {
       ? 'FAZENDA'
       : rawType === 'ARMAZEM' || rawType === 'ARMAZÉM'
         ? 'ARMAZÉM'
-        : rawType === 'VAGAO' || rawType === 'VAGÃO'
-          ? 'VAGÃO'
-          : 'ARMAZÉM';
+        : rawType || '';
+  const now = new Date().toISOString();
   return {
     ...record,
     id: record.id || makeId('location'),
     name: record.name || '',
     type,
+    createdAt: record.createdAt || now,
+    updatedAt: record.updatedAt || record.createdAt || now,
+    createdBy: record.createdBy || OPERATION_USER,
+    updatedBy: record.updatedBy || record.createdBy || OPERATION_USER,
     typeDescription: record.typeDescription || '',
     normalizedName: record.normalizedName || normalizeText(record.name || ''),
     favorite: Boolean(record.favorite),
@@ -484,6 +517,23 @@ function emptyPerson(): Person {
     currentLocation: '',
     lastLocationUpdate: '',
     operationalStatus: 'Disponível',
+    createdAt: '',
+    updatedAt: '',
+    createdBy: OPERATION_USER,
+    updatedBy: OPERATION_USER,
+  };
+}
+function normalizePerson(item: Partial<Person>): Person {
+  const base = emptyPerson();
+  const record = { ...base, ...item };
+  const now = new Date().toISOString();
+  return {
+    ...record,
+    id: record.id || makeId('person'),
+    createdAt: record.createdAt || now,
+    updatedAt: record.updatedAt || record.createdAt || now,
+    createdBy: record.createdBy || OPERATION_USER,
+    updatedBy: record.updatedBy || record.createdBy || OPERATION_USER,
   };
 }
 function emptyLocation(): BoardingLocation {
@@ -516,6 +566,10 @@ function emptyLocation(): BoardingLocation {
     typeDescription: '',
     normalizedName: '',
     active: true,
+    createdAt: '',
+    updatedAt: '',
+    createdBy: OPERATION_USER,
+    updatedBy: OPERATION_USER,
   };
 }
 function emptySchedule(): Schedule {
@@ -543,6 +597,8 @@ function emptySchedule(): Schedule {
     status: 'Rascunho',
     arrivalLeadMinutes: 30,
     stopBufferMinutes: 10,
+    updatedAt: new Date().toISOString(),
+    updatedBy: OPERATION_USER,
   };
 }
 function normalizeDailyPlan(item: Partial<DailyPlan>): DailyPlan {
@@ -623,6 +679,10 @@ function normalizeSchedule(item: Partial<Schedule>): Schedule {
     ...base,
     ...item,
     id: item.id || makeId('schedule'),
+    createdAt: item.createdAt || base.createdAt,
+    createdBy: item.createdBy || base.createdBy,
+    updatedAt: item.updatedAt || item.createdAt || base.createdAt,
+    updatedBy: item.updatedBy || item.createdBy || base.createdBy,
     locationId,
     destinationName: textValue(destinationName),
     destinationAddress: item.destinationAddress || '',
@@ -642,6 +702,49 @@ function normalizeSchedule(item: Partial<Schedule>): Schedule {
       : [],
     locationSnapshot: snapshot,
   };
+}
+function normalizePersistedState(
+  saved: Partial<import('@/lib/storage').PersistedState>,
+) {
+  const normalizedLocations = Array.isArray(saved.locations)
+    ? (saved.locations as Partial<BoardingLocation>[]).map(normalizeLocation)
+    : [];
+  const normalizedSchedules = Array.isArray(saved.schedules)
+    ? (saved.schedules as Partial<Schedule>[])
+        .map(normalizeSchedule)
+        .map((schedule) => {
+          if (schedule.locationSnapshot) return schedule;
+          const location = normalizedLocations.find(
+            (item) => item.id === schedule.locationId,
+          );
+          return location
+            ? { ...schedule, locationSnapshot: locationSnapshotOf(location) }
+            : schedule;
+        })
+    : [];
+  return {
+    people: Array.isArray(saved.people)
+      ? (saved.people as Partial<Person>[]).map(normalizePerson)
+      : [],
+    locations: normalizedLocations,
+    schedules: normalizedSchedules,
+    dailyPlans: Array.isArray(saved.dailyPlans)
+      ? (saved.dailyPlans as Partial<DailyPlan>[]).map(normalizeDailyPlan)
+      : [],
+    suggestions: (saved.suggestions ?? []) as SuggestionDecision[],
+    feedbacks: (saved.feedbacks ?? []) as FeedbackItem[],
+    costPerKm: saved.costPerKm ?? 1.2,
+  };
+}
+function persistedStateNeedsAudit(
+  saved: Partial<import('@/lib/storage').PersistedState>,
+) {
+  return [...(saved.people ?? []), ...(saved.locations ?? []), ...(saved.schedules ?? [])].some(
+    (item) => {
+      const record = item as Record<string, unknown>;
+      return !record.createdAt || !record.updatedAt;
+    },
+  );
 }
 
 const SEED_PEOPLE: Person[] = [
@@ -822,6 +925,37 @@ function Field({
       {children}
       {hint && <small>{hint}</small>}
     </label>
+  );
+}
+function formatDateTime(value?: string) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? '—'
+    : new Intl.DateTimeFormat('pt-BR', {
+        dateStyle: 'short',
+        timeStyle: 'short',
+      }).format(date);
+}
+function AuditMeta({
+  createdAt,
+  updatedAt,
+  createdBy,
+  updatedBy,
+}: {
+  createdAt?: string;
+  updatedAt?: string;
+  createdBy?: string;
+  updatedBy?: string;
+}) {
+  if (!createdAt && !updatedAt) return null;
+  return (
+    <small className="record-audit">
+      Criado em {formatDateTime(createdAt)}{createdBy ? ` por ${createdBy}` : ''}
+      {' · '}
+      Alterado em {formatDateTime(updatedAt || createdAt)}
+      {updatedBy ? ` por ${updatedBy}` : ''}
+    </small>
   );
 }
 function SectionTitle({
@@ -1264,6 +1398,9 @@ export default function Home() {
   const [locations, setLocations] = useState<BoardingLocation[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [suggestions, setSuggestions] = useState<SuggestionDecision[]>([]);
+  const [feedbacks, setFeedbacks] = useState<FeedbackItem[]>([]);
+  const [feedbackType, setFeedbackType] = useState<FeedbackType>('ERRO');
+  const [feedbackDescription, setFeedbackDescription] = useState('');
   const [dailyPlans, setDailyPlans] = useState<DailyPlan[]>([]);
   const [costPerKm, setCostPerKm] = useState(1.2);
   const [toast, setToast] = useState<Toast>(null);
@@ -1344,39 +1481,14 @@ export default function Home() {
   function applyPersistedState(
     saved: Partial<import('@/lib/storage').PersistedState>,
   ) {
-    const normalizedLocations = Array.isArray(saved.locations)
-      ? (saved.locations as Partial<BoardingLocation>[]).map(normalizeLocation)
-      : [];
-    const normalizedSchedules = Array.isArray(saved.schedules)
-      ? (saved.schedules as Partial<Schedule>[])
-          .map(normalizeSchedule)
-          .map((schedule) => {
-            if (schedule.locationSnapshot) return schedule;
-            const location = normalizedLocations.find(
-              (item) => item.id === schedule.locationId,
-            );
-            return location
-              ? { ...schedule, locationSnapshot: locationSnapshotOf(location) }
-              : schedule;
-          })
-      : [];
-    setPeople(
-      Array.isArray(saved.people)
-        ? (saved.people as Partial<Person>[]).map((item) => ({
-            ...emptyPerson(),
-            ...item,
-          }))
-        : [],
-    );
-    setLocations(normalizedLocations);
-    setSchedules(normalizedSchedules);
-    setDailyPlans(
-      Array.isArray(saved.dailyPlans)
-        ? (saved.dailyPlans as Partial<DailyPlan>[]).map(normalizeDailyPlan)
-        : [],
-    );
-    setSuggestions((saved.suggestions ?? []) as SuggestionDecision[]);
-    setCostPerKm(saved.costPerKm ?? 1.2);
+    const normalized = normalizePersistedState(saved);
+    setPeople(normalized.people);
+    setLocations(normalized.locations);
+    setSchedules(normalized.schedules);
+    setDailyPlans(normalized.dailyPlans);
+    setSuggestions(normalized.suggestions);
+    setFeedbacks(normalized.feedbacks);
+    setCostPerKm(normalized.costPerKm);
   }
 
   function currentPersistedState() {
@@ -1386,6 +1498,7 @@ export default function Home() {
       schedules,
       dailyPlans,
       suggestions,
+      feedbacks,
       costPerKm,
     };
   }
@@ -1425,7 +1538,9 @@ export default function Home() {
           cloud.state.schedules?.length,
         );
         if (!cloudHasData && localHasData && local) {
-          const migrated = mergePersistedStates(cloud.state, local);
+          const migrated = normalizePersistedState(
+            mergePersistedStates(cloud.state, local),
+          );
           applyPersistedState(migrated);
           setLocalMigrationAvailable(false);
           try {
@@ -1440,7 +1555,7 @@ export default function Home() {
             setLocalMigrationAvailable(true);
           }
         } else {
-          skipNextPersistRef.current = true;
+          skipNextPersistRef.current = !persistedStateNeedsAudit(cloud.state);
           applyPersistedState(cloud.state);
           setLocalMigrationAvailable(false);
         }
@@ -1516,7 +1631,16 @@ export default function Home() {
       if (cloudSaveTimerRef.current)
         window.clearTimeout(cloudSaveTimerRef.current);
     };
-  }, [ready, people, locations, schedules, dailyPlans, suggestions, costPerKm]);
+  }, [
+    ready,
+    people,
+    locations,
+    schedules,
+    dailyPlans,
+    suggestions,
+    feedbacks,
+    costPerKm,
+  ]);
   useEffect(() => {
     if (!whatsappPreviewOpen) return;
     const text = buildWhatsAppText();
@@ -1612,7 +1736,10 @@ export default function Home() {
     [people],
   );
   const activeLocations = useMemo(
-    () => locations.filter((location) => location.active),
+    () =>
+      locations.filter(
+        (location) => location.active && LOCATION_TYPES.includes(location.type as (typeof LOCATION_TYPES)[number]),
+      ),
     [locations],
   );
   const todaySchedules = useMemo(
@@ -2002,6 +2129,52 @@ export default function Home() {
     setMobileMenu(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
+  function submitFeedback() {
+    const description = feedbackDescription.trim();
+    if (!description)
+      return notify('Descreva o feedback antes de enviar.', 'error');
+    const now = new Date().toISOString();
+    const currentScreen = NAV.find((item) => item.id === view)?.label || view;
+    const record: FeedbackItem = {
+      id: makeId('feedback'),
+      type: feedbackType,
+      description,
+      currentScreen,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: OPERATION_USER,
+      updatedBy: OPERATION_USER,
+    };
+    setFeedbacks((current) => [record, ...current]);
+    setFeedbackDescription('');
+    setFeedbackType('ERRO');
+    notify('Feedback enviado para o banco compartilhado.', 'success');
+  }
+  function exportBackup() {
+    const payload = {
+      app: "IT'S AGRO · Programação de embarque",
+      version: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      source: 'Banco compartilhado',
+      people,
+      locations,
+      schedules,
+      dailyPlans,
+      history: schedules,
+      suggestions,
+      feedbacks,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `its-agro-backup-${todayIso()}.json`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    notify('Backup JSON exportado.', 'success');
+  }
   function savePerson() {
     const hasCoordinates = personDraft.lat != null && personDraft.lng != null;
     if (
@@ -2013,9 +2186,15 @@ export default function Home() {
         'Informe nome, endereço e cidade, ou marque coordenadas válidas no mapa.',
         'error',
       );
+    const now = new Date().toISOString();
+    const previous = people.find((person) => person.id === personDraft.id);
     const record = {
       ...personDraft,
       id: personDraft.id || makeId('person'),
+      createdAt: previous?.createdAt || personDraft.createdAt || now,
+      updatedAt: now,
+      createdBy: previous?.createdBy || personDraft.createdBy || OPERATION_USER,
+      updatedBy: OPERATION_USER,
       lastLocationUpdate:
         personDraft.lastLocationUpdate || new Date().toLocaleString('pt-BR'),
     };
@@ -2034,7 +2213,9 @@ export default function Home() {
     const hasCoordinates =
       locationDraft.lat != null && locationDraft.lng != null;
     if (
-      !locationDraft.type.trim() ||
+      !LOCATION_TYPES.includes(
+        locationDraft.type as (typeof LOCATION_TYPES)[number],
+      ) ||
       !locationDraft.name.trim() ||
       ((!locationDraft.address.trim() || !locationDraft.city.trim()) &&
         !hasCoordinates)
@@ -2043,9 +2224,15 @@ export default function Home() {
         'Selecione o tipo e informe nome, endereço e cidade, ou confirme coordenadas válidas no mapa.',
         'error',
       );
+    const now = new Date().toISOString();
+    const previous = locations.find((location) => location.id === locationDraft.id);
     const record = normalizeLocation({
       ...locationDraft,
       id: locationDraft.id || makeId('location'),
+      createdAt: previous?.createdAt || locationDraft.createdAt || now,
+      updatedAt: now,
+      createdBy: previous?.createdBy || locationDraft.createdBy || OPERATION_USER,
+      updatedBy: OPERATION_USER,
       normalizedName: normalizeText(locationDraft.name),
       locationQuality: hasCoordinates
         ? locationDraft.locationQuality === 'missing'
@@ -2477,8 +2664,14 @@ export default function Home() {
       return notify('⚠️ SELECIONE UM LOCAL DE EMBARQUE VÁLIDO.', 'error');
     if (routeDirty || !routePlan)
       return notify('Calcule ou otimize a rota antes de salvar.', 'error');
+    const now = new Date().toISOString();
+    const previous = schedules.find((schedule) => schedule.id === scheduleDraft.id);
     const record = {
       ...scheduleDraft,
+      createdAt: previous?.createdAt || scheduleDraft.createdAt || now,
+      createdBy: previous?.createdBy || scheduleDraft.createdBy || OPERATION_USER,
+      updatedAt: now,
+      updatedBy: OPERATION_USER,
       destinationName: selectedLocation.name,
       destinationAddress: addressOf(selectedLocation),
       destinationCity: selectedLocation.city,
@@ -2959,6 +3152,12 @@ export default function Home() {
             />
           </Field>
         </div>
+        <AuditMeta
+          createdAt={personDraft.createdAt}
+          updatedAt={personDraft.updatedAt}
+          createdBy={personDraft.createdBy}
+          updatedBy={personDraft.updatedBy}
+        />
         <div className="location-helper">
           <div>
             <LocateFixed size={18} />
@@ -3031,7 +3230,11 @@ export default function Home() {
           </Field>
           <Field label="Tipo">
             <select
-              value={locationDraft.type}
+              value={LOCATION_TYPES.includes(
+                locationDraft.type as (typeof LOCATION_TYPES)[number],
+              )
+                ? locationDraft.type
+                : ''}
               onChange={(event) =>
                 setLocationDraft((current) => ({
                   ...current,
@@ -3044,6 +3247,15 @@ export default function Home() {
                 <option key={type}>{type}</option>
               ))}
             </select>
+            {locationDraft.id &&
+              !LOCATION_TYPES.includes(
+                locationDraft.type as (typeof LOCATION_TYPES)[number],
+              ) && (
+                <small className="legacy-type-notice">
+                  Registro legado: escolha Fazenda ou Armazém para
+                  reclassificar.
+                </small>
+              )}
           </Field>
           <Field label="Cidade">
             <input
@@ -3286,6 +3498,12 @@ export default function Home() {
             <span>Local ativo para novas programações</span>
           </label>
         </div>
+        <AuditMeta
+          createdAt={locationDraft.createdAt}
+          updatedAt={locationDraft.updatedAt}
+          createdBy={locationDraft.createdBy}
+          updatedBy={locationDraft.updatedBy}
+        />
         <div className="location-helper">
           <div>
             <MapPin size={18} />
@@ -3924,8 +4142,11 @@ export default function Home() {
     const warehouseCount = locations.filter(
       (location) => location.type === 'ARMAZÉM',
     ).length;
-    const wagonCount = locations.filter(
-      (location) => location.type === 'VAGÃO',
+    const legacyCount = locations.filter(
+      (location) =>
+        !LOCATION_TYPES.includes(
+          location.type as (typeof LOCATION_TYPES)[number],
+        ),
     ).length;
     return (
       <>
@@ -3962,11 +4183,14 @@ export default function Home() {
             <span>Armazéns</span>
             <strong>{warehouseCount}</strong>
           </div>
-          <div className="location-overview-stat">
-            <span>Vagões</span>
-            <strong>{wagonCount}</strong>
-          </div>
         </section>
+        {legacyCount > 0 && (
+          <p className="legacy-type-notice">
+            {legacyCount} registro(s) legado(s) mantido(s) para revisão
+            administrativa. Novos cadastros e programações aceitam apenas
+            Fazenda ou Armazém.
+          </p>
+        )}
         <section className="card table-card">
           <div className="toolbar">
             <div className="search-box">
@@ -3989,7 +4213,6 @@ export default function Home() {
               <option value="all">Todos</option>
               <option value="FAZENDA">Fazenda</option>
               <option value="ARMAZÉM">Armazém</option>
-              <option value="VAGÃO">Vagão</option>
             </select>
           </div>
           {visibleLocations.length ? (
@@ -4002,7 +4225,21 @@ export default function Home() {
                   <div className="location-card-content">
                     <div className="location-card-head">
                       <div>
-                        <Badge tone="olive">{location.type}</Badge>
+                        <Badge tone="olive">
+                          {LOCATION_TYPES.includes(
+                            location.type as (typeof LOCATION_TYPES)[number],
+                          )
+                            ? location.type
+                            : 'Tipo legado'}
+                        </Badge>
+                        {!LOCATION_TYPES.includes(
+                          location.type as (typeof LOCATION_TYPES)[number],
+                        ) && (
+                          <small className="legacy-type-notice">
+                            Tipo anterior indisponível · edite para Fazenda ou
+                            Armazém.
+                          </small>
+                        )}
                         {location.favorite && (
                           <Badge tone="gold">
                             <Star size={12} /> Favorito
@@ -5675,6 +5912,13 @@ export default function Home() {
                       <td>
                         <strong>{formatDate(schedule.date)}</strong>
                         <small className="table-subtext">{schedule.time}</small>
+                        <small className="table-subtext">
+                          Criado em {formatDateTime(schedule.createdAt)}
+                        </small>
+                        <small className="table-subtext">
+                          Alterado em{' '}
+                          {formatDateTime(schedule.updatedAt || schedule.createdAt)}
+                        </small>
                       </td>
                       <td>
                         <strong>
@@ -5768,6 +6012,112 @@ export default function Home() {
             <p className="section-description">
               As decisões de troca aplicadas ou ignoradas aparecerão aqui.
             </p>
+          )}
+        </section>
+      </>
+    );
+  }
+  function renderFeedbackPage() {
+    const currentScreen = NAV.find((item) => item.id === view)?.label || view;
+    return (
+      <>
+        <SectionTitle
+          eyebrow="HOMOLOGAÇÃO"
+          title="Enviar feedback"
+          text="Registre rapidamente um erro, melhoria ou dúvida para a equipe da operação."
+        />
+        <section className="card editor-card">
+          <div className="card-heading">
+            <div>
+              <p className="eyebrow">FEEDBACK DA EQUIPE</p>
+              <h2>Nova mensagem</h2>
+            </div>
+            <MessageSquarePlus size={20} />
+          </div>
+          <div className="form-grid">
+            <Field label="Tipo">
+              <select
+                value={feedbackType}
+                onChange={(event) =>
+                  setFeedbackType(event.target.value as FeedbackType)
+                }
+              >
+                <option>ERRO</option>
+                <option>MELHORIA</option>
+                <option>DÚVIDA</option>
+              </select>
+            </Field>
+            <Field label="Tela atual">
+              <input value={currentScreen} readOnly />
+            </Field>
+            <Field label="Data/hora">
+              <input value={formatDateTime(new Date().toISOString())} readOnly />
+            </Field>
+            <Field label="Descrição" className="span-2">
+              <textarea
+                rows={5}
+                value={feedbackDescription}
+                onChange={(event) => setFeedbackDescription(event.target.value)}
+                placeholder="Descreva o que aconteceu ou a sugestão..."
+              />
+            </Field>
+          </div>
+          <div className="editor-actions">
+            <button
+              type="button"
+              className="button button-primary"
+              onClick={submitFeedback}
+            >
+              <MessageSquarePlus size={16} /> Enviar
+            </button>
+          </div>
+        </section>
+        <section className="card">
+          <div className="card-heading">
+            <div>
+              <p className="eyebrow">ADMINISTRAÇÃO</p>
+              <h2>Backup e versão</h2>
+            </div>
+            <Badge tone="olive">Versão {APP_VERSION}</Badge>
+          </div>
+          <p className="section-description">
+            Exporte pessoas, locais, programações, histórico e feedbacks em
+            JSON para manter uma cópia antes de qualquer migração futura.
+          </p>
+          <button
+            type="button"
+            className="button button-secondary"
+            onClick={exportBackup}
+          >
+            <Download size={16} /> Exportar backup
+          </button>
+        </section>
+        <section className="card">
+          <div className="card-heading">
+            <div>
+              <p className="eyebrow">REGISTROS RECENTES</p>
+              <h2>Feedbacks enviados</h2>
+            </div>
+            <Badge tone="neutral">{feedbacks.length}</Badge>
+          </div>
+          {feedbacks.length ? (
+            <div className="suggestion-history-list">
+              {feedbacks.slice(0, 8).map((feedback) => (
+                <article className="suggestion-history-row" key={feedback.id}>
+                  <div>
+                    <Badge tone={feedback.type === 'ERRO' ? 'inactive' : 'olive'}>
+                      {feedback.type}
+                    </Badge>
+                    <strong>{feedback.description}</strong>
+                    <small>
+                      {feedback.currentScreen} · {formatDateTime(feedback.createdAt)}
+                    </small>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="section-description">Nenhum feedback enviado ainda.</p>
           )}
         </section>
       </>
@@ -5939,6 +6289,7 @@ export default function Home() {
     if (view === 'routes') return renderRoutesPage();
     if (view === 'planning') return renderPlanningPage();
     if (view === 'history') return renderHistoryPage();
+    if (view === 'feedback') return renderFeedbackPage();
     return renderDashboard();
   }
   return (
@@ -5992,7 +6343,7 @@ export default function Home() {
               <small>
                 {isDevelopmentSeedAllowed()
                   ? 'Dados salvos neste dispositivo'
-                  : 'Banco compartilhado'}
+                  : 'Banco compartilhado · Ambiente de testes'}
               </small>
             </span>
           </div>
@@ -6000,6 +6351,8 @@ export default function Home() {
             IT'S AGRO
             <br />
             <span>Operação que aproxima pessoas</span>
+            <br />
+            <span>Versão {APP_VERSION}</span>
           </p>
         </div>
       </aside>
@@ -6026,7 +6379,7 @@ export default function Home() {
               <span className="online-dot" />
               {isDevelopmentSeedAllowed()
                 ? 'Ambiente local'
-                : 'Produção · online'}
+                : 'AMBIENTE DE TESTES · online'}
             </span>
             <button
               type="button"

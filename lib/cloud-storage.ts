@@ -96,6 +96,7 @@ export function mergePersistedStates(
     schedules: merge(remote.schedules, local.schedules),
     dailyPlans: merge(remote.dailyPlans, local.dailyPlans),
     suggestions: merge(remote.suggestions, local.suggestions),
+    feedbacks: merge(remote.feedbacks, local.feedbacks),
     costPerKm: local.costPerKm ?? remote.costPerKm ?? 1.2,
   };
 }

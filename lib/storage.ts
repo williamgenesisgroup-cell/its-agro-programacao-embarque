@@ -6,6 +6,7 @@ export type PersistedState = {
   schedules: unknown[];
   dailyPlans?: unknown[];
   suggestions?: unknown[];
+  feedbacks?: unknown[];
   costPerKm?: number;
   source?: 'ONLINE' | 'LOCAL MIGRADO';
 };
