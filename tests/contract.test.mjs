@@ -8,7 +8,7 @@ test('entrega os fluxos operacionais solicitados', async () => {
     'utf8',
   );
   assert.match(page, /Programação de embarque/);
-  assert.match(page, /Compartilhar no WhatsApp/);
+  assert.match(page, /Compartilhar programação/);
   assert.match(page, /Mapa da operação/);
   assert.match(page, /Comparar programação/);
   assert.match(page, /Local atual/);
@@ -24,9 +24,7 @@ test('entrega os fluxos operacionais solicitados', async () => {
   );
   assert.match(page, /Selecione/);
   assert.match(page, /locationTypeFilter/);
-  assert.match(page, /location-map-icon-farm/);
-  assert.match(page, /location-map-icon-warehouse/);
-  assert.match(page, /location-map-icon-wagon/);
+  assert.match(page, /business-map-icon-\$\{type\}/);
   assert.match(page, /Confirmar coordenadas/);
   assert.match(page, /Planejamento do dia/);
   assert.match(page, /Analisar programação/);

@@ -1,4 +1,19 @@
-export function GET() {
+import { hasDatabaseConfigured, withDatabase } from '@/db/server';
+
+export async function GET() {
+  let database: 'online' | 'not-configured' | 'error' = 'not-configured';
+  let databaseVersion: number | null = null;
+  if (hasDatabaseConfigured()) {
+    try {
+      const result = await withDatabase('health-check', async (client) =>
+        client.query('select version from public.app_state where id = 1'),
+      );
+      database = 'online';
+      databaseVersion = Number(result.rows[0]?.version || 0);
+    } catch {
+      database = 'error';
+    }
+  }
   return Response.json({
     ok: true,
     service: "it's-agro-programacao-embarque",
@@ -8,6 +23,7 @@ export function GET() {
         : 'coordinate-estimate',
     geocodingProvider: process.env.GEOCODING_PROVIDER || 'nominatim',
     mapProvider: process.env.NEXT_PUBLIC_MAP_PROVIDER || 'openstreetmap',
-    database: process.env.DATABASE_URL ? 'configured' : 'local-storage',
+    database,
+    databaseVersion,
   });
 }

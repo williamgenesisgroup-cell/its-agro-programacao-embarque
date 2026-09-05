@@ -7,6 +7,7 @@ export type PersistedState = {
   dailyPlans?: unknown[];
   suggestions?: unknown[];
   costPerKm?: number;
+  source?: 'ONLINE' | 'LOCAL MIGRADO';
 };
 
 export function readPersistedState(): PersistedState | null {

@@ -81,6 +81,17 @@ import {
   readPersistedState,
   writePersistedState,
 } from '@/lib/storage';
+import {
+  CloudConflictError,
+  fetchCloudState,
+  mergePersistedStates,
+  saveCloudState,
+} from '@/lib/cloud-storage';
+import {
+  buildMassWhatsAppMessage,
+  shortName,
+  type WhatsAppMode,
+} from '@/lib/whatsapp';
 
 type View =
   | 'dashboard'
@@ -153,6 +164,19 @@ type BoardingLocation = {
 type SchedulePerson = RoutePoint & { sourcePersonId: string };
 type MapPoint = RoutePoint & {
   markerType?: 'person' | 'fazenda' | 'armazem' | 'vagao';
+  sequence?: number;
+  code?: string;
+} & Partial<
+    Pick<RouteStop, 'order' | 'distanceKm' | 'durationMin' | 'pickupTime'>
+  >;
+type LocationSnapshot = {
+  id: string;
+  name: string;
+  type: string;
+  city: string;
+  uf: string;
+  lat: number | null;
+  lng: number | null;
 };
 type SuggestionDecision = {
   id: string;
@@ -189,6 +213,7 @@ type Schedule = {
   status: ScheduleStatus;
   arrivalLeadMinutes: number;
   stopBufferMinutes: number;
+  locationSnapshot?: LocationSnapshot;
 };
 type DailyPlan = {
   id: string;
@@ -209,6 +234,7 @@ type PlanningDecision = {
   createdAt: string;
 };
 type Toast = { message: string; tone: 'success' | 'error' | 'info' } | null;
+type SyncStatus = 'online' | 'syncing' | 'offline';
 type Comparison = {
   original: Person;
   suggested: Person;
@@ -305,6 +331,11 @@ function normalizeText(value: string) {
     .trim()
     .replace(/\s+/g, ' ');
 }
+function textValue(value: unknown) {
+  return typeof value === 'string' || typeof value === 'number'
+    ? String(value)
+    : '';
+}
 function locationQualityOf(location: BoardingLocation) {
   if (location.lat == null || location.lng == null) return 'missing';
   return location.locationQuality || 'approximate';
@@ -347,11 +378,12 @@ function cssStatus(value: string) {
 function locationMarkerType(
   location: BoardingLocation | null,
 ): MapPoint['markerType'] {
-  if (location?.type === 'FAZENDA') return 'fazenda';
-  if (location?.type === 'VAGÃO') return 'vagao';
+  const type = normalizeText(location?.type || '').toUpperCase();
+  if (type === 'FAZENDA') return 'fazenda';
+  if (type === 'VAGAO' || type === 'VAGÃO') return 'vagao';
   return 'armazem';
 }
-function toPoint(person: Person): MapPoint {
+function toPoint(person: Person, sequence?: number): MapPoint {
   return {
     id: person.id,
     label: person.name,
@@ -360,20 +392,62 @@ function toPoint(person: Person): MapPoint {
     lat: person.lat ?? undefined,
     lng: person.lng ?? undefined,
     markerType: 'person',
+    sequence,
   };
+}
+function locationSnapshotOf(location: BoardingLocation): LocationSnapshot {
+  return {
+    id: location.id,
+    name: location.name,
+    type: location.type,
+    city: location.city,
+    uf: location.uf,
+    lat: location.lat,
+    lng: location.lng,
+  };
+}
+function isMissingLabel(value: unknown) {
+  return (
+    !value ||
+    (typeof value === 'string' && ['?', '??', '�'].includes(value.trim()))
+  );
+}
+function resolveScheduleDestination(
+  schedule: Schedule,
+  locations: BoardingLocation[],
+) {
+  const location = locations.find((item) => item.id === schedule.locationId);
+  if (location?.name) return location.name;
+  if (schedule.locationSnapshot?.name) return schedule.locationSnapshot.name;
+  if (!isMissingLabel(schedule.destinationName))
+    return schedule.destinationName;
+  return schedule.locationId
+    ? '⚠️ LOCAL NÃO ENCONTRADO'
+    : '⚠️ DESTINO NÃO DEFINIDO';
 }
 function destinationPoint(
   location: BoardingLocation | null,
   schedule: Schedule,
 ): MapPoint {
+  const snapshot = schedule.locationSnapshot;
   return {
     id: schedule.locationId || 'destination',
-    label: location?.name || schedule.destinationName,
+    label:
+      location?.name ||
+      snapshot?.name ||
+      (!isMissingLabel(schedule.destinationName)
+        ? schedule.destinationName
+        : schedule.locationId
+          ? '⚠️ LOCAL NÃO ENCONTRADO'
+          : '⚠️ DESTINO NÃO DEFINIDO'),
     address: schedule.destinationAddress,
-    city: schedule.destinationCity,
-    lat: schedule.destinationLat ?? undefined,
-    lng: schedule.destinationLng ?? undefined,
-    markerType: locationMarkerType(location),
+    city: schedule.destinationCity || snapshot?.city || '',
+    lat: schedule.destinationLat ?? snapshot?.lat ?? undefined,
+    lng: schedule.destinationLng ?? snapshot?.lng ?? undefined,
+    markerType: location
+      ? locationMarkerType(location)
+      : locationMarkerType({ type: snapshot?.type || '' } as BoardingLocation),
+    code: 'D1',
   };
 }
 function snapshot(person: Person): SchedulePerson {
@@ -496,6 +570,77 @@ function normalizeDailyPlan(item: Partial<DailyPlan>): DailyPlan {
       ? item.decisions.map((decision) => ({ ...decision }))
       : [],
     updatedAt: item.updatedAt || new Date().toISOString(),
+  };
+}
+function normalizeSchedule(item: Partial<Schedule>): Schedule {
+  const base = emptySchedule();
+  const legacy = item as Record<string, unknown>;
+  const legacySnapshot = legacy.locationSnapshot as
+    | Partial<LocationSnapshot>
+    | undefined;
+  const locationId = textValue(
+    item.locationId || legacy.boardingLocationId || legacy.localId || '',
+  );
+  const people = Array.isArray(item.people)
+    ? item.people.map((person, index) => {
+        const value = person as Partial<SchedulePerson> &
+          Record<string, unknown>;
+        return {
+          id:
+            textValue(value.id || value.sourcePersonId) ||
+            makeId(`schedule-person-${index}`),
+          sourcePersonId: textValue(
+            value.sourcePersonId || value.personId || value.id,
+          ),
+          label: textValue(value.label || value.name),
+          address: textValue(value.address),
+          city: textValue(value.city),
+          phone: textValue(value.phone),
+          lat: value.lat == null ? undefined : Number(value.lat),
+          lng: value.lng == null ? undefined : Number(value.lng),
+        };
+      })
+    : [];
+  const snapshot = legacySnapshot?.name
+    ? {
+        id: String(legacySnapshot.id || locationId),
+        name: String(legacySnapshot.name),
+        type: String(legacySnapshot.type || ''),
+        city: String(legacySnapshot.city || item.destinationCity || ''),
+        uf: String(legacySnapshot.uf || item.destinationUf || ''),
+        lat: legacySnapshot.lat == null ? null : Number(legacySnapshot.lat),
+        lng: legacySnapshot.lng == null ? null : Number(legacySnapshot.lng),
+      }
+    : undefined;
+  const destinationName = [
+    item.destinationName,
+    legacy.destination,
+    legacy.locationName,
+    legacy.boardingLocationName,
+    snapshot?.name,
+  ].find((value) => !isMissingLabel(value));
+  return {
+    ...base,
+    ...item,
+    id: item.id || makeId('schedule'),
+    locationId,
+    destinationName: textValue(destinationName),
+    destinationAddress: item.destinationAddress || '',
+    destinationCity: item.destinationCity || snapshot?.city || '',
+    destinationUf: item.destinationUf || snapshot?.uf || '',
+    destinationLat: item.destinationLat ?? snapshot?.lat ?? null,
+    destinationLng: item.destinationLng ?? snapshot?.lng ?? null,
+    people,
+    originalOrder: Array.isArray(item.originalOrder)
+      ? item.originalOrder.map(String)
+      : people.map((person) => person.id),
+    optimizedOrder: Array.isArray(item.optimizedOrder)
+      ? item.optimizedOrder.map(String)
+      : people.map((person) => person.id),
+    routeStops: Array.isArray(item.routeStops)
+      ? (item.routeStops as RouteStop[])
+      : [],
+    locationSnapshot: snapshot,
   };
 }
 
@@ -909,6 +1054,47 @@ function MiniMap({
 }
 void MiniMap;
 
+function escapeMarkerHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => {
+    const entities: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    };
+    return entities[character];
+  });
+}
+function markerSvg(type: MapPoint['markerType']) {
+  if (type === 'person')
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.2"/><path d="M5.5 20c.7-4 2.8-6 6.5-6s5.8 2 6.5 6"/></svg>';
+  if (type === 'fazenda')
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20V9l9-6 9 6v11M7 20v-6h10v6M9 10h.01M15 10h.01"/></svg>';
+  if (type === 'vagao')
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H4zM7 20h.01M17 20h.01M7 16v2M17 16v2M4 10h16"/></svg>';
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V7h16v13M2 20h20M7 7V4h10v3M8 11h2M14 11h2M8 15h2M14 15h2"/></svg>';
+}
+function markerIcon(
+  L: typeof import('leaflet'),
+  point: MapPoint,
+  index: number,
+  showName: boolean,
+) {
+  const isPerson = point.markerType === 'person';
+  const code = escapeMarkerHtml(
+    point.code || String(point.sequence ?? index + 1).padStart(2, '0'),
+  );
+  const name = escapeMarkerHtml(shortName(point.label));
+  const type = isPerson ? 'person' : point.markerType || 'armazem';
+  return L.divIcon({
+    className: `business-map-icon business-map-icon-${type}`,
+    html: `<span class="business-map-marker" aria-label="${code} ${name}">${markerSvg(point.markerType)}<b>${code}</b>${showName ? `<em>${name}</em>` : ''}</span>`,
+    iconSize: [0, 0],
+    iconAnchor: [0, 0],
+  });
+}
+
 function RealMap({
   points,
   destination,
@@ -929,6 +1115,7 @@ function RealMap({
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<import('leaflet').Map | null>(null);
   const pickerMarkerRef = useRef<import('leaflet').Marker | null>(null);
+  const businessMarkersRef = useRef<import('leaflet').Marker[]>([]);
   const [mapReady, setMapReady] = useState(false);
   const all = destination ? [...points, destination] : points;
   const located = all.filter((point) => point.lat != null && point.lng != null);
@@ -953,39 +1140,37 @@ function RealMap({
         attribution: '© OpenStreetMap contributors',
         maxZoom: 19,
       }).addTo(map);
-      located.forEach((point) => {
-        const icon =
-          point.markerType === 'fazenda'
-            ? L.divIcon({
-                className: 'location-map-icon location-map-icon-farm',
-                html: '<span aria-hidden="true">🌾</span>',
-                iconSize: [36, 36],
-                iconAnchor: [18, 18],
-              })
-            : point.markerType === 'armazem'
-              ? L.divIcon({
-                  className: 'location-map-icon location-map-icon-warehouse',
-                  html: '<span aria-hidden="true">▣</span>',
-                  iconSize: [36, 36],
-                  iconAnchor: [18, 18],
-                })
-              : point.markerType === 'vagao'
-                ? L.divIcon({
-                    className: 'location-map-icon location-map-icon-wagon',
-                    html: '<span aria-hidden="true">▤</span>',
-                    iconSize: [36, 36],
-                    iconAnchor: [18, 18],
-                  })
-                : undefined;
+      if (located.length > 1) {
+        L.polyline(
+          located.map((point): [number, number] => [
+            point.lat as number,
+            point.lng as number,
+          ]),
+          { color: '#d86c86', weight: 4, opacity: 0.7 },
+        ).addTo(map);
+      }
+      const markers = located.map((point) => {
+        const originalIndex = all.indexOf(point);
         const marker = L.marker([point.lat as number, point.lng as number], {
           title: point.label,
-          ...(icon ? { icon } : {}),
+          icon: markerIcon(L, point, originalIndex, map.getZoom() >= 8),
         }).addTo(map);
         marker.bindPopup(
-          `<strong>${point.label}</strong><br>${point.city || ''}`,
+          `<strong>${escapeMarkerHtml(point.label)}</strong><br>${escapeMarkerHtml(point.city || '')}`,
         );
         if (onSelect) marker.on('click', () => onSelect(point.id));
+        return marker;
       });
+      businessMarkersRef.current = markers;
+      const refreshMarkerLabels = () => {
+        const showName = map.getZoom() >= 8;
+        located.forEach((point, index) => {
+          markers[index].setIcon(
+            markerIcon(L, point, all.indexOf(point), showName),
+          );
+        });
+      };
+      map.on('zoomend', refreshMarkerLabels);
       if (located.length > 1) {
         map.fitBounds(
           L.latLngBounds(
@@ -1018,6 +1203,7 @@ function RealMap({
     return () => {
       disposed = true;
       pickerMarkerRef.current = null;
+      businessMarkersRef.current = [];
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -1139,40 +1325,229 @@ export default function Home() {
   const [planningDecisions, setPlanningDecisions] = useState<
     PlanningDecision[]
   >([]);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('syncing');
+  const [cloudVersion, setCloudVersion] = useState(1);
+  const [cloudReady, setCloudReady] = useState(false);
+  const [localMigrationAvailable, setLocalMigrationAvailable] = useState(false);
+  const [whatsappMode, setWhatsappMode] = useState<WhatsAppMode>('resumido');
+  const [includeWhatsappAddresses, setIncludeWhatsappAddresses] =
+    useState(false);
+  const [whatsappPreviewOpen, setWhatsappPreviewOpen] = useState(false);
+  const [whatsappDraftText, setWhatsappDraftText] = useState('');
+  const [whatsappEditing, setWhatsappEditing] = useState(false);
+  const cloudVersionRef = useRef(1);
+  const cloudReadyRef = useRef(false);
+  const cloudSaveInFlightRef = useRef(false);
+  const cloudSaveTimerRef = useRef<number | null>(null);
+  const skipNextPersistRef = useRef(false);
+
+  function applyPersistedState(
+    saved: Partial<import('@/lib/storage').PersistedState>,
+  ) {
+    const normalizedLocations = Array.isArray(saved.locations)
+      ? (saved.locations as Partial<BoardingLocation>[]).map(normalizeLocation)
+      : [];
+    const normalizedSchedules = Array.isArray(saved.schedules)
+      ? (saved.schedules as Partial<Schedule>[])
+          .map(normalizeSchedule)
+          .map((schedule) => {
+            if (schedule.locationSnapshot) return schedule;
+            const location = normalizedLocations.find(
+              (item) => item.id === schedule.locationId,
+            );
+            return location
+              ? { ...schedule, locationSnapshot: locationSnapshotOf(location) }
+              : schedule;
+          })
+      : [];
+    setPeople(
+      Array.isArray(saved.people)
+        ? (saved.people as Partial<Person>[]).map((item) => ({
+            ...emptyPerson(),
+            ...item,
+          }))
+        : [],
+    );
+    setLocations(normalizedLocations);
+    setSchedules(normalizedSchedules);
+    setDailyPlans(
+      Array.isArray(saved.dailyPlans)
+        ? (saved.dailyPlans as Partial<DailyPlan>[]).map(normalizeDailyPlan)
+        : [],
+    );
+    setSuggestions((saved.suggestions ?? []) as SuggestionDecision[]);
+    setCostPerKm(saved.costPerKm ?? 1.2);
+  }
+
+  function currentPersistedState() {
+    return {
+      people,
+      locations,
+      schedules,
+      dailyPlans,
+      suggestions,
+      costPerKm,
+    };
+  }
 
   useEffect(() => {
-    const saved = readPersistedState();
-    if (saved) {
-      setPeople(saved.people as Person[]);
-      setLocations(
-        (saved.locations as Partial<BoardingLocation>[]).map(normalizeLocation),
-      );
-      setSchedules(saved.schedules as Schedule[]);
-      setDailyPlans(
-        (saved.dailyPlans as Partial<DailyPlan>[] | undefined)?.map(
-          normalizeDailyPlan,
-        ) ?? [],
-      );
-      setSuggestions((saved.suggestions ?? []) as SuggestionDecision[]);
-      setCostPerKm(saved.costPerKm ?? 1.2);
-    } else if (isDevelopmentSeedAllowed()) {
-      setPeople(SEED_PEOPLE);
-      setLocations(SEED_LOCATIONS.map(normalizeLocation));
-      setSchedules([seedSchedule()]);
+    let cancelled = false;
+    const local = readPersistedState();
+    const localHasData = Boolean(
+      local &&
+      (local.people?.length ||
+        local.locations?.length ||
+        local.schedules?.length),
+    );
+    if (isDevelopmentSeedAllowed()) {
+      if (local) applyPersistedState(local);
+      else {
+        setPeople(SEED_PEOPLE);
+        setLocations(SEED_LOCATIONS.map(normalizeLocation));
+        setSchedules([seedSchedule()]);
+      }
+      setCloudReady(false);
+      setSyncStatus('offline');
+      setReady(true);
+      return () => {
+        cancelled = true;
+      };
     }
-    setReady(true);
+    setSyncStatus('syncing');
+    void fetchCloudState()
+      .then(async (cloud) => {
+        if (cancelled) return;
+        cloudVersionRef.current = cloud.version;
+        setCloudVersion(cloud.version);
+        const cloudHasData = Boolean(
+          cloud.state.people?.length ||
+          cloud.state.locations?.length ||
+          cloud.state.schedules?.length,
+        );
+        if (!cloudHasData && localHasData && local) {
+          const migrated = mergePersistedStates(cloud.state, local);
+          applyPersistedState(migrated);
+          setLocalMigrationAvailable(false);
+          try {
+            const saved = await saveCloudState(
+              migrated,
+              cloud.version,
+              'LOCAL MIGRADO',
+            );
+            cloudVersionRef.current = saved.version;
+            setCloudVersion(saved.version);
+          } catch {
+            setLocalMigrationAvailable(true);
+          }
+        } else {
+          skipNextPersistRef.current = true;
+          applyPersistedState(cloud.state);
+          setLocalMigrationAvailable(false);
+        }
+        if (!cancelled) {
+          cloudReadyRef.current = true;
+          setCloudReady(true);
+          setSyncStatus('online');
+          setReady(true);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        if (local) applyPersistedState(local);
+        setLocalMigrationAvailable(Boolean(localHasData));
+        cloudReadyRef.current = false;
+        setCloudReady(false);
+        setSyncStatus('offline');
+        setReady(true);
+        notify(
+          'Sem conexão com o banco online. Os dados locais estão disponíveis para migração.',
+          'error',
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
   useEffect(() => {
-    if (ready)
-      writePersistedState({
-        people,
-        locations,
-        schedules,
-        dailyPlans,
-        suggestions,
-        costPerKm,
-      });
+    if (!ready) return undefined;
+    const state = currentPersistedState();
+    if (isDevelopmentSeedAllowed()) {
+      writePersistedState(state);
+      return undefined;
+    }
+    if (!cloudReadyRef.current) return undefined;
+    if (skipNextPersistRef.current) {
+      skipNextPersistRef.current = false;
+      return undefined;
+    }
+    if (cloudSaveTimerRef.current)
+      window.clearTimeout(cloudSaveTimerRef.current);
+    setSyncStatus('syncing');
+    cloudSaveTimerRef.current = window.setTimeout(() => {
+      if (cloudSaveInFlightRef.current) return;
+      cloudSaveInFlightRef.current = true;
+      void saveCloudState(state, cloudVersionRef.current)
+        .then((saved) => {
+          cloudVersionRef.current = saved.version;
+          setCloudVersion(saved.version);
+          setSyncStatus('online');
+        })
+        .catch((error: unknown) => {
+          if (error instanceof CloudConflictError) {
+            cloudVersionRef.current = error.remote.version;
+            setCloudVersion(error.remote.version);
+            skipNextPersistRef.current = true;
+            applyPersistedState(error.remote.state);
+            setSyncStatus('online');
+            notify(
+              '⚠️ Registro alterado por outro usuário. Dados mais recentes carregados.',
+              'info',
+            );
+          } else {
+            setSyncStatus('offline');
+            notify('Não foi possível sincronizar com o banco online.', 'error');
+          }
+        })
+        .finally(() => {
+          cloudSaveInFlightRef.current = false;
+        });
+    }, 450);
+    return () => {
+      if (cloudSaveTimerRef.current)
+        window.clearTimeout(cloudSaveTimerRef.current);
+    };
   }, [ready, people, locations, schedules, dailyPlans, suggestions, costPerKm]);
+  useEffect(() => {
+    if (!whatsappPreviewOpen) return;
+    const text = buildWhatsAppText();
+    if (text) setWhatsappDraftText(text);
+  }, [
+    whatsappPreviewOpen,
+    whatsappMode,
+    includeWhatsappAddresses,
+    scheduleDraft,
+    routePlan,
+    locations,
+    people,
+  ]);
+  useEffect(() => {
+    if (!ready || !cloudReady || isDevelopmentSeedAllowed()) return undefined;
+    const poll = window.setInterval(() => {
+      if (cloudSaveInFlightRef.current) return;
+      void fetchCloudState()
+        .then((cloud) => {
+          if (cloud.version > cloudVersionRef.current) {
+            cloudVersionRef.current = cloud.version;
+            setCloudVersion(cloud.version);
+            skipNextPersistRef.current = true;
+            applyPersistedState(cloud.state);
+          }
+          setSyncStatus('online');
+        })
+        .catch(() => setSyncStatus('offline'));
+    }, 5000);
+    return () => window.clearInterval(poll);
+  }, [ready, cloudReady]);
   useEffect(() => {
     if (!routePlan) return;
     setRoutePlan((current) =>
@@ -1335,6 +1710,7 @@ export default function Home() {
                 destinationUf: plannedLocation.uf,
                 destinationLat: plannedLocation.lat,
                 destinationLng: plannedLocation.lng,
+                locationSnapshot: locationSnapshotOf(plannedLocation),
                 status: 'Rascunho' as ScheduleStatus,
               }
             : null;
@@ -1381,6 +1757,49 @@ export default function Home() {
     null;
   function notify(message: string, tone: NonNullable<Toast>['tone'] = 'info') {
     setToast({ message, tone });
+  }
+  async function migrateLocalData() {
+    if (isDevelopmentSeedAllowed()) {
+      notify('A migração fica disponível no ambiente publicado.', 'info');
+      return;
+    }
+    setSyncStatus('syncing');
+    try {
+      const cloud = await fetchCloudState();
+      const local = readPersistedState() ?? currentPersistedState();
+      const migrated = mergePersistedStates(cloud.state, local);
+      const saved = await saveCloudState(
+        migrated,
+        cloud.version,
+        'LOCAL MIGRADO',
+      );
+      cloudVersionRef.current = saved.version;
+      setCloudVersion(saved.version);
+      skipNextPersistRef.current = true;
+      applyPersistedState(saved.state);
+      cloudReadyRef.current = true;
+      setCloudReady(true);
+      setLocalMigrationAvailable(false);
+      setSyncStatus('online');
+      notify('Dados locais migrados para o banco compartilhado.', 'success');
+    } catch (error) {
+      setSyncStatus('offline');
+      if (error instanceof CloudConflictError) {
+        cloudVersionRef.current = error.remote.version;
+        setCloudVersion(error.remote.version);
+        skipNextPersistRef.current = true;
+        applyPersistedState(error.remote.state);
+        notify(
+          '⚠️ Registro alterado por outro usuário. Dados mais recentes carregados.',
+          'info',
+        );
+      } else {
+        notify(
+          'Não foi possível migrar agora. Tente novamente quando houver conexão.',
+          'error',
+        );
+      }
+    }
   }
   async function lookupPersonCep() {
     const digits = cepDigits(personDraft.cep);
@@ -1887,6 +2306,7 @@ export default function Home() {
         destinationUf: location.uf,
         destinationLat: location.lat,
         destinationLng: location.lng,
+        locationSnapshot: locationSnapshotOf(location),
       });
     const initialPerson =
       view === 'routes' ? selectedMarker?.person : undefined;
@@ -1913,6 +2333,7 @@ export default function Home() {
       destinationUf: location.uf,
       destinationLat: location.lat,
       destinationLng: location.lng,
+      locationSnapshot: locationSnapshotOf(location),
     });
     setScheduleDraft(next);
     setRoutePlan(null);
@@ -1961,6 +2382,7 @@ export default function Home() {
       destinationUf: location.uf,
       destinationLat: location.lat,
       destinationLng: location.lng,
+      locationSnapshot: locationSnapshotOf(location),
     }));
     setRoutePlan(null);
     setRouteDirty(true);
@@ -2038,6 +2460,9 @@ export default function Home() {
     setRouteDirty(true);
   }
   function saveSchedule() {
+    const selectedLocation = locations.find(
+      (location) => location.id === scheduleDraft.locationId,
+    );
     if (
       !scheduleDraft.locationId ||
       !scheduleDraft.date ||
@@ -2048,10 +2473,19 @@ export default function Home() {
         'Complete destino, data, horário e pessoas antes de salvar.',
         'error',
       );
+    if (!selectedLocation?.name)
+      return notify('⚠️ SELECIONE UM LOCAL DE EMBARQUE VÁLIDO.', 'error');
     if (routeDirty || !routePlan)
       return notify('Calcule ou otimize a rota antes de salvar.', 'error');
     const record = {
       ...scheduleDraft,
+      destinationName: selectedLocation.name,
+      destinationAddress: addressOf(selectedLocation),
+      destinationCity: selectedLocation.city,
+      destinationUf: selectedLocation.uf,
+      destinationLat: selectedLocation.lat,
+      destinationLng: selectedLocation.lng,
+      locationSnapshot: locationSnapshotOf(selectedLocation),
       status: 'Programado' as ScheduleStatus,
       routeStops: routePlan.stops,
       optimizedOrder: routePlan.stops.map((stop) => stop.id),
@@ -2077,67 +2511,74 @@ export default function Home() {
     setScheduleDraft(record);
     notify('Programação salva e mapa atualizado.', 'success');
   }
+  function whatsappRows() {
+    const stops = routePlan?.stops?.length
+      ? routePlan.stops
+      : scheduleDraft.routeStops?.length
+        ? scheduleDraft.routeStops
+        : scheduleDraft.people.map((person, index) => ({
+            ...person,
+            order: index + 1,
+            distanceKm: null,
+            durationMin: null,
+            pickupTime: null,
+          }));
+    const destination = resolveScheduleDestination(scheduleDraft, locations);
+    return stops.map((stop, index) => {
+      const person = scheduleDraft.people.find(
+        (item) => item.id === stop.id || item.sourcePersonId === stop.id,
+      );
+      return {
+        number: index + 1,
+        name: person?.label || stop.label || 'NOME NÃO DEFINIDO',
+        destination,
+        time: stop.pickupTime,
+        address: stop.address,
+      };
+    });
+  }
   function buildWhatsAppText() {
-    if (!scheduleDraft.people.length || !scheduleDraft.destinationName) {
+    const rows = whatsappRows();
+    if (!rows.length || !scheduleDraft.locationId) {
       notify('Adicione destino e pessoas para gerar o texto.', 'error');
       return '';
     }
-    const stops =
-      routePlan?.stops ??
-      scheduleDraft.people.map((person, index) => ({
-        ...person,
-        order: index + 1,
-        distanceKm: null,
-        durationMin: null,
-        pickupTime: null,
-      }));
-    const lines = [
-      '🚐 *PROGRAMAÇÃO DE EMBARQUE*',
-      '',
-      `📅 *Data:* ${formatDate(scheduleDraft.date)}`,
-      `✈️ *Embarque:* ${scheduleDraft.time}`,
-      `📍 *Destino:* ${scheduleDraft.destinationName}`,
-      '',
-      '*ROTA DE COLETA*',
-      '',
-    ];
-    stops.forEach((stop, index) =>
-      lines.push(
-        `${index + 1}️⃣ *${stop.label.toUpperCase()}*`,
-        `⏰ ${stop.pickupTime ?? 'A confirmar'}`,
-        `📍 ${stop.address}`,
-        '',
-      ),
-    );
-    lines.push(
-      `🏁 *Chegada prevista:* ${routePlan?.arrivalTime ?? scheduleDraft.time}`,
-      '',
-      `🛣️ Distância estimada: ${formatDistance(routePlan?.totalKm ?? scheduleDraft.totalKm)}`,
-      `⏱️ Tempo estimado: ${formatDuration(routePlan?.totalMinutes ?? scheduleDraft.totalMinutes)}`,
-      '',
-      '⚠️ *Pedimos que todos estejam prontos no horário programado.*',
-      '',
-      "*IT'S AGRO*",
-    );
-    return lines.join('\n');
+    return buildMassWhatsAppMessage({
+      date: scheduleDraft.date,
+      rows,
+      mode: whatsappMode,
+      includeAddresses: includeWhatsappAddresses,
+    });
   }
-  function copyWhatsApp() {
+  function openWhatsappPreview() {
     const text = buildWhatsAppText();
     if (!text) return;
-    navigator.clipboard
-      ?.writeText(text)
-      .then(() => notify('Texto copiado para o WhatsApp.', 'success'))
-      .catch(() => notify('Não foi possível copiar automaticamente.', 'error'));
+    setWhatsappDraftText(text);
+    setWhatsappPreviewOpen(true);
+  }
+  async function copyWhatsApp() {
+    const text = whatsappDraftText || buildWhatsAppText();
+    if (!text) return;
+    setWhatsappDraftText(text);
+    setWhatsappPreviewOpen(true);
+    try {
+      await navigator.clipboard.writeText(text);
+      notify('Programação copiada. Agora você pode colar no grupo.', 'success');
+    } catch {
+      notify('Selecione o texto da prévia e copie manualmente.', 'info');
+    }
   }
   function shareWhatsApp() {
-    const text = buildWhatsAppText();
-    if (!text) return;
+    openWhatsappPreview();
+  }
+  function openWhatsappFromPreview() {
+    if (!whatsappDraftText.trim()) return;
     window.open(
-      `https://wa.me/?text=${encodeURIComponent(text)}`,
+      `https://wa.me/?text=${encodeURIComponent(whatsappDraftText)}`,
       '_blank',
       'noopener,noreferrer',
     );
-    notify('WhatsApp aberto com a mensagem pronta.', 'success');
+    notify('WhatsApp aberto com uma única mensagem da programação.', 'success');
   }
   function suggestionForSchedule() {
     if (!scheduleDraft.people.length || !scheduleDraft.locationId) return null;
@@ -2972,6 +3413,12 @@ export default function Home() {
     const savedKm = suggestions
       .filter((item) => item.decision === 'APLICADA')
       .reduce((total, item) => total + item.economyKm, 0);
+    const syncLabel =
+      syncStatus === 'online'
+        ? '🟢 ONLINE — DADOS SINCRONIZADOS'
+        : syncStatus === 'syncing'
+          ? '🟡 SINCRONIZANDO'
+          : '🔴 SEM CONEXÃO';
     return (
       <>
         <section className="dashboard-hero">
@@ -3067,6 +3514,41 @@ export default function Home() {
             tone="olive"
           />
         </section>
+        <section className={`card sync-panel sync-${syncStatus}`}>
+          <div className="sync-panel-main">
+            <div className="side-card-icon">
+              <RefreshCw size={18} />
+            </div>
+            <div>
+              <p className="eyebrow">STATUS DOS DADOS</p>
+              <h2>{syncLabel}</h2>
+              <p>Banco compartilhado · versão {cloudVersion}</p>
+            </div>
+          </div>
+          <div className="sync-counts">
+            <span>
+              <strong>{people.length}</strong> pessoas
+            </span>
+            <span>
+              <strong>{locations.length}</strong> locais
+            </span>
+            <span>
+              <strong>{schedules.length}</strong> programações
+            </span>
+            <span>
+              <strong>0</strong> pendentes
+            </span>
+          </div>
+          {localMigrationAvailable && (
+            <button
+              type="button"
+              className="button button-secondary"
+              onClick={() => void migrateLocalData()}
+            >
+              <RefreshCw size={15} /> Migrar dados locais
+            </button>
+          )}
+        </section>
         <div className="dashboard-grid">
           <section className="card upcoming-card">
             <div className="card-heading">
@@ -3102,7 +3584,9 @@ export default function Home() {
                       </small>
                     </span>
                     <span className="upcoming-main">
-                      <strong>{schedule.destinationName}</strong>
+                      <strong>
+                        {resolveScheduleDestination(schedule, locations)}
+                      </strong>
                       <small>
                         <Clock3 size={13} /> {schedule.time} ·{' '}
                         {schedule.people.length} pessoa(s)
@@ -3793,7 +4277,7 @@ export default function Home() {
         .toLowerCase()
         .includes(personPickerQuery.toLowerCase()),
     );
-    const routePoints =
+    const routePoints: MapPoint[] = (
       routePlan?.stops ??
       scheduleDraft.people.map((person, index) => ({
         ...person,
@@ -3801,7 +4285,12 @@ export default function Home() {
         distanceKm: null,
         durationMin: null,
         pickupTime: null,
-      }));
+      }))
+    ).map((point, index) => ({
+      ...point,
+      markerType: 'person' as const,
+      sequence: index + 1,
+    }));
     const destination =
       locations.find((location) => location.id === scheduleDraft.locationId) ??
       null;
@@ -4180,8 +4669,8 @@ export default function Home() {
                       <div className="stop-meta">
                         <strong>{stop.pickupTime ?? '—'}</strong>
                         <small>
-                          {formatDistance(stop.distanceKm)} ·{' '}
-                          {formatDuration(stop.durationMin)}
+                          {formatDistance(stop.distanceKm ?? null)} ·{' '}
+                          {formatDuration(stop.durationMin ?? null)}
                         </small>
                       </div>
                       <div className="stop-move">
@@ -4308,20 +4797,44 @@ export default function Home() {
               </div>
               <p className="eyebrow">COMPARTILHAMENTO</p>
               <h3>Equipe alinhada</h3>
-              <p>Gere um texto com a rota, horários e aviso operacional.</p>
+              <p>Gere uma única mensagem curta para o grupo do WhatsApp.</p>
+              <div className="whatsapp-options">
+                <label className="field">
+                  <span>Modelo</span>
+                  <select
+                    value={whatsappMode}
+                    onChange={(event) =>
+                      setWhatsappMode(event.target.value as WhatsAppMode)
+                    }
+                  >
+                    <option value="resumido">Modo resumido</option>
+                    <option value="completo">Modo completo</option>
+                  </select>
+                </label>
+                <label className="checkbox-option">
+                  <input
+                    type="checkbox"
+                    checked={includeWhatsappAddresses}
+                    onChange={(event) =>
+                      setIncludeWhatsappAddresses(event.target.checked)
+                    }
+                  />
+                  <span>Incluir endereços</span>
+                </label>
+              </div>
               <button
                 type="button"
                 className="button whatsapp-button"
                 onClick={shareWhatsApp}
               >
-                <MessageCircle size={17} /> Compartilhar no WhatsApp
+                <MessageCircle size={17} /> Compartilhar programação
               </button>
               <button
                 type="button"
                 className="button button-secondary full-button"
                 onClick={copyWhatsApp}
               >
-                <Clipboard size={16} /> Copiar texto
+                <Clipboard size={16} /> Copiar programação
               </button>
             </section>
             <section className="card side-card">
@@ -4354,8 +4867,11 @@ export default function Home() {
 
   function renderRoutesPage() {
     const mapPoints: MapPoint[] = [
-      ...operationMarkers.map((marker) => toPoint(marker.person)),
-      ...activeLocations.map((location) => ({
+      ...operationMarkers.map((marker, index) => ({
+        ...toPoint(marker.person, index + 1),
+        code: String(index + 1).padStart(2, '0'),
+      })),
+      ...activeLocations.map((location, index) => ({
         id: `location-${location.id}`,
         label: location.name,
         address: addressOf(location),
@@ -4363,6 +4879,7 @@ export default function Home() {
         lat: location.lat ?? undefined,
         lng: location.lng ?? undefined,
         markerType: locationMarkerType(location),
+        code: `D${index + 1}`,
       })),
     ];
     const filters = (
@@ -5160,7 +5677,9 @@ export default function Home() {
                         <small className="table-subtext">{schedule.time}</small>
                       </td>
                       <td>
-                        <strong>{schedule.destinationName}</strong>
+                        <strong>
+                          {resolveScheduleDestination(schedule, locations)}
+                        </strong>
                         <small className="table-subtext">
                           {schedule.destinationCity}/{schedule.destinationUf}
                         </small>
@@ -5252,6 +5771,72 @@ export default function Home() {
           )}
         </section>
       </>
+    );
+  }
+  function renderWhatsappModal() {
+    if (!whatsappPreviewOpen) return null;
+    return (
+      <div
+        className="modal-backdrop"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Prévia da programação para WhatsApp"
+      >
+        <div className="comparison-modal whatsapp-preview-modal">
+          <div className="card-heading">
+            <div>
+              <p className="eyebrow">PRÉVIA · UMA MENSAGEM</p>
+              <h2>Programação para o grupo</h2>
+            </div>
+            <IconButton
+              label="Fechar prévia"
+              onClick={() => {
+                setWhatsappPreviewOpen(false);
+                setWhatsappEditing(false);
+              }}
+            >
+              <X size={18} />
+            </IconButton>
+          </div>
+          {whatsappEditing ? (
+            <textarea
+              className="whatsapp-preview-editor"
+              value={whatsappDraftText}
+              onChange={(event) => setWhatsappDraftText(event.target.value)}
+              aria-label="Editar texto da programação"
+              rows={12}
+            />
+          ) : (
+            <pre className="whatsapp-preview-text">{whatsappDraftText}</pre>
+          )}
+          <div className="modal-actions whatsapp-preview-actions">
+            <button
+              type="button"
+              className="button button-secondary"
+              onClick={() => {
+                setWhatsappEditing((current) => !current);
+              }}
+            >
+              <Pencil size={15} />{' '}
+              {whatsappEditing ? 'Concluir edição' : 'Editar texto'}
+            </button>
+            <button
+              type="button"
+              className="button button-secondary"
+              onClick={() => void copyWhatsApp()}
+            >
+              <Copy size={15} /> Copiar
+            </button>
+            <button
+              type="button"
+              className="button whatsapp-button"
+              onClick={openWhatsappFromPreview}
+            >
+              <MessageCircle size={15} /> WhatsApp
+            </button>
+          </div>
+        </div>
+      </div>
     );
   }
   function renderComparisonModal() {
@@ -5392,11 +5977,23 @@ export default function Home() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="connection-status">
+          <div className={`connection-status sync-${syncStatus}`}>
             <span className="online-dot" />
             <span>
-              <strong>Modo local</strong>
-              <small>Dados salvos neste dispositivo</small>
+              <strong>
+                {isDevelopmentSeedAllowed()
+                  ? 'Modo local'
+                  : syncStatus === 'online'
+                    ? 'ONLINE — DADOS SINCRONIZADOS'
+                    : syncStatus === 'syncing'
+                      ? 'SINCRONIZANDO'
+                      : 'SEM CONEXÃO'}
+              </strong>
+              <small>
+                {isDevelopmentSeedAllowed()
+                  ? 'Dados salvos neste dispositivo'
+                  : 'Banco compartilhado'}
+              </small>
             </span>
           </div>
           <p>
@@ -5426,7 +6023,10 @@ export default function Home() {
           </div>
           <div className="topbar-actions">
             <span className="environment-pill">
-              <span className="online-dot" /> Ambiente de testes
+              <span className="online-dot" />
+              {isDevelopmentSeedAllowed()
+                ? 'Ambiente local'
+                : 'Produção · online'}
             </span>
             <button
               type="button"
@@ -5481,6 +6081,7 @@ export default function Home() {
           </button>
         ))}
       </div>
+      {renderWhatsappModal()}
       {renderComparisonModal()}
     </div>
   );
