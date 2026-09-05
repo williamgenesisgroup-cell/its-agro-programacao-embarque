@@ -719,6 +719,38 @@ a {
 .table-card {
   padding: 20px;
 }
+.location-overview-card {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 15px;
+}
+.location-overview-stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 13px;
+  border: 1px solid #e0e7df;
+  border-radius: 12px;
+  background: #fbfcfa;
+}
+.location-overview-stat span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.location-overview-stat strong {
+  color: var(--olive-deep);
+  font-size: 22px;
+}
+.location-filter-select {
+  min-width: 132px;
+}
 .toolbar {
   display: flex;
   align-items: center;
@@ -1723,6 +1755,25 @@ a {
   font-family: inherit;
   font-size: 12px;
 }
+.location-map-icon {
+  display: grid;
+  place-items: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 3px 9px rgb(25 42 31 / 28%);
+  color: #fff;
+  font-size: 17px;
+  line-height: 1;
+}
+.location-map-icon-farm {
+  background: #a8872f;
+}
+.location-map-icon-warehouse {
+  background: #536d55;
+}
+.location-map-icon-wagon {
+  background: #765174;
+}
 .map-picker-actions {
   display: flex;
   align-items: center;
@@ -2673,6 +2724,20 @@ a {
   .operation-map-card {
     padding: 17px;
   }
+  .location-overview-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 11px;
+  }
+  .location-overview-stat {
+    min-height: 43px;
+    padding-inline: 10px;
+  }
+  .location-overview-stat span {
+    font-size: 10px;
+  }
+  .location-overview-stat strong {
+    font-size: 19px;
+  }
   .toolbar,
   .picker-toolbar,
   .history-toolbar {
@@ -3018,6 +3083,9 @@ a {
   }
   .real-map-canvas {
     height: 280px;
+  }
+  .location-overview-card {
+    gap: 8px;
   }
   .map-legend {
     left: 7px;

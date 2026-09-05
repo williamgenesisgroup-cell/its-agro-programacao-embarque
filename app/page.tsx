@@ -151,6 +151,9 @@ type BoardingLocation = {
   active: boolean;
 };
 type SchedulePerson = RoutePoint & { sourcePersonId: string };
+type MapPoint = RoutePoint & {
+  markerType?: 'person' | 'fazenda' | 'armazem' | 'vagao';
+};
 type SuggestionDecision = {
   id: string;
   date: string;
@@ -235,22 +238,7 @@ const NAV: { id: View; label: string; icon: LucideIcon }[] = [
   { id: 'planning', label: 'Planejamento do dia', icon: Clipboard },
   { id: 'history', label: 'Histórico', icon: History },
 ];
-const LOCATION_TYPES = [
-  'Aeroporto',
-  'Rodoviária',
-  'Hotel',
-  'Empresa',
-  'Unidade',
-  'Armazém',
-  'Fazenda',
-  'Silo',
-  'Terminal',
-  'Porto',
-  'Pátio',
-  'Filial',
-  'Ponto de encontro',
-  'Outro',
-];
+const LOCATION_TYPES = ['FAZENDA', 'ARMAZÉM', 'VAGÃO'];
 const OPERATIONAL_STATUSES: OperationalStatus[] = [
   'Disponível',
   'Programado',
@@ -324,11 +312,20 @@ function locationQualityOf(location: BoardingLocation) {
 function normalizeLocation(item: Partial<BoardingLocation>): BoardingLocation {
   const base = emptyLocation();
   const record = { ...base, ...item };
+  const rawType = normalizeText(record.type || '').toUpperCase();
+  const type =
+    rawType === 'FAZENDA'
+      ? 'FAZENDA'
+      : rawType === 'ARMAZEM' || rawType === 'ARMAZÉM'
+        ? 'ARMAZÉM'
+        : rawType === 'VAGAO' || rawType === 'VAGÃO'
+          ? 'VAGÃO'
+          : 'ARMAZÉM';
   return {
     ...record,
     id: record.id || makeId('location'),
     name: record.name || '',
-    type: record.type || 'Ponto de encontro',
+    type,
     typeDescription: record.typeDescription || '',
     normalizedName: record.normalizedName || normalizeText(record.name || ''),
     favorite: Boolean(record.favorite),
@@ -347,7 +344,14 @@ function normalizeLocation(item: Partial<BoardingLocation>): BoardingLocation {
 function cssStatus(value: string) {
   return value.toLowerCase().replaceAll(' ', '-').replaceAll('ã', 'a');
 }
-function toPoint(person: Person): RoutePoint {
+function locationMarkerType(
+  location: BoardingLocation | null,
+): MapPoint['markerType'] {
+  if (location?.type === 'FAZENDA') return 'fazenda';
+  if (location?.type === 'VAGÃO') return 'vagao';
+  return 'armazem';
+}
+function toPoint(person: Person): MapPoint {
   return {
     id: person.id,
     label: person.name,
@@ -355,12 +359,13 @@ function toPoint(person: Person): RoutePoint {
     city: person.city,
     lat: person.lat ?? undefined,
     lng: person.lng ?? undefined,
+    markerType: 'person',
   };
 }
 function destinationPoint(
   location: BoardingLocation | null,
   schedule: Schedule,
-): RoutePoint {
+): MapPoint {
   return {
     id: schedule.locationId || 'destination',
     label: location?.name || schedule.destinationName,
@@ -368,6 +373,7 @@ function destinationPoint(
     city: schedule.destinationCity,
     lat: schedule.destinationLat ?? undefined,
     lng: schedule.destinationLng ?? undefined,
+    markerType: locationMarkerType(location),
   };
 }
 function snapshot(person: Person): SchedulePerson {
@@ -410,7 +416,7 @@ function emptyLocation(): BoardingLocation {
   return {
     id: '',
     name: '',
-    type: 'Ponto de encontro',
+    type: '',
     city: '',
     uf: 'PR',
     address: '',
@@ -783,8 +789,8 @@ function MiniMap({
   zoom,
   onZoom,
 }: {
-  points: RoutePoint[];
-  destination?: RoutePoint | null;
+  points: MapPoint[];
+  destination?: MapPoint | null;
   title: string;
   selectedId?: string | null;
   onSelect?: (id: string) => void;
@@ -912,8 +918,8 @@ function RealMap({
   onPickerChange,
   onConfirm,
 }: {
-  points: RoutePoint[];
-  destination?: RoutePoint | null;
+  points: MapPoint[];
+  destination?: MapPoint | null;
   title: string;
   onSelect?: (id: string) => void;
   pickerValue?: { lat: number | null; lng: number | null };
@@ -948,8 +954,32 @@ function RealMap({
         maxZoom: 19,
       }).addTo(map);
       located.forEach((point) => {
+        const icon =
+          point.markerType === 'fazenda'
+            ? L.divIcon({
+                className: 'location-map-icon location-map-icon-farm',
+                html: '<span aria-hidden="true">🌾</span>',
+                iconSize: [36, 36],
+                iconAnchor: [18, 18],
+              })
+            : point.markerType === 'armazem'
+              ? L.divIcon({
+                  className: 'location-map-icon location-map-icon-warehouse',
+                  html: '<span aria-hidden="true">▣</span>',
+                  iconSize: [36, 36],
+                  iconAnchor: [18, 18],
+                })
+              : point.markerType === 'vagao'
+                ? L.divIcon({
+                    className: 'location-map-icon location-map-icon-wagon',
+                    html: '<span aria-hidden="true">▤</span>',
+                    iconSize: [36, 36],
+                    iconAnchor: [18, 18],
+                  })
+                : undefined;
         const marker = L.marker([point.lat as number, point.lng as number], {
           title: point.label,
+          ...(icon ? { icon } : {}),
         }).addTo(map);
         marker.bindPopup(
           `<strong>${point.label}</strong><br>${point.city || ''}`,
@@ -1073,6 +1103,7 @@ export default function Home() {
   const [personQuery, setPersonQuery] = useState('');
   const [personStatus, setPersonStatus] = useState('all');
   const [locationQuery, setLocationQuery] = useState('');
+  const [locationTypeFilter, setLocationTypeFilter] = useState('all');
   const [scheduleDraft, setScheduleDraft] = useState<Schedule>(emptySchedule());
   const [routePlan, setRoutePlan] = useState<RoutePlan | null>(null);
   const [routeDirty, setRouteDirty] = useState(true);
@@ -1126,7 +1157,7 @@ export default function Home() {
       setCostPerKm(saved.costPerKm ?? 1.2);
     } else if (isDevelopmentSeedAllowed()) {
       setPeople(SEED_PEOPLE);
-      setLocations(SEED_LOCATIONS);
+      setLocations(SEED_LOCATIONS.map(normalizeLocation));
       setSchedules([seedSchedule()]);
     }
     setReady(true);
@@ -1233,13 +1264,18 @@ export default function Home() {
             `${location.name} ${location.type} ${location.city} ${location.address} ${location.cep}`,
           ).includes(normalizeText(locationQuery)),
         )
+        .filter(
+          (location) =>
+            locationTypeFilter === 'all' ||
+            location.type === locationTypeFilter,
+        )
         .sort(
           (a, b) =>
             Number(b.favorite) - Number(a.favorite) ||
             b.usageCount - a.usageCount ||
             a.name.localeCompare(b.name),
         ),
-    [locations, locationQuery],
+    [locations, locationQuery, locationTypeFilter],
   );
   const visibleSchedules = useMemo(
     () =>
@@ -1579,12 +1615,13 @@ export default function Home() {
     const hasCoordinates =
       locationDraft.lat != null && locationDraft.lng != null;
     if (
+      !locationDraft.type.trim() ||
       !locationDraft.name.trim() ||
       ((!locationDraft.address.trim() || !locationDraft.city.trim()) &&
         !hasCoordinates)
     )
       return notify(
-        'Informe nome, endereço e cidade, ou confirme coordenadas válidas no mapa.',
+        'Selecione o tipo e informe nome, endereço e cidade, ou confirme coordenadas válidas no mapa.',
         'error',
       );
     const record = normalizeLocation({
@@ -2561,6 +2598,7 @@ export default function Home() {
                 }))
               }
             >
+              <option value="">Selecione</option>
               {LOCATION_TYPES.map((type) => (
                 <option key={type}>{type}</option>
               ))}
@@ -2678,20 +2716,6 @@ export default function Home() {
               }
             />
           </Field>
-          {locationDraft.type === 'Outro' && (
-            <Field label="Descreva o tipo" className="span-2">
-              <input
-                value={locationDraft.typeDescription}
-                onChange={(event) =>
-                  setLocationDraft((current) => ({
-                    ...current,
-                    typeDescription: event.target.value,
-                  }))
-                }
-                placeholder="Ex.: Pátio de apoio"
-              />
-            </Field>
-          )}
           <Field label="Descrição do local" className="span-2">
             <input
               value={locationDraft.description}
@@ -3410,6 +3434,15 @@ export default function Home() {
   }
 
   function renderLocationsPage() {
+    const farmCount = locations.filter(
+      (location) => location.type === 'FAZENDA',
+    ).length;
+    const warehouseCount = locations.filter(
+      (location) => location.type === 'ARMAZÉM',
+    ).length;
+    const wagonCount = locations.filter(
+      (location) => location.type === 'VAGÃO',
+    ).length;
     return (
       <>
         <SectionTitle
@@ -3432,6 +3465,24 @@ export default function Home() {
           }
         />
         {showLocationForm && renderLocationEditor()}
+        <section className="card location-overview-card">
+          <div className="location-overview-stat">
+            <span>Total de locais</span>
+            <strong>{locations.length}</strong>
+          </div>
+          <div className="location-overview-stat">
+            <span>Fazendas</span>
+            <strong>{farmCount}</strong>
+          </div>
+          <div className="location-overview-stat">
+            <span>Armazéns</span>
+            <strong>{warehouseCount}</strong>
+          </div>
+          <div className="location-overview-stat">
+            <span>Vagões</span>
+            <strong>{wagonCount}</strong>
+          </div>
+        </section>
         <section className="card table-card">
           <div className="toolbar">
             <div className="search-box">
@@ -3445,6 +3496,17 @@ export default function Home() {
             <span className="result-count">
               {visibleLocations.length} registro(s)
             </span>
+            <select
+              className="location-filter-select"
+              value={locationTypeFilter}
+              onChange={(event) => setLocationTypeFilter(event.target.value)}
+              aria-label="Filtrar locais por tipo"
+            >
+              <option value="all">Todos</option>
+              <option value="FAZENDA">Fazenda</option>
+              <option value="ARMAZÉM">Armazém</option>
+              <option value="VAGÃO">Vagão</option>
+            </select>
           </div>
           {visibleLocations.length ? (
             <div className="location-cards">
@@ -4291,7 +4353,7 @@ export default function Home() {
   }
 
   function renderRoutesPage() {
-    const mapPoints = [
+    const mapPoints: MapPoint[] = [
       ...operationMarkers.map((marker) => toPoint(marker.person)),
       ...activeLocations.map((location) => ({
         id: `location-${location.id}`,
@@ -4300,6 +4362,7 @@ export default function Home() {
         city: location.city,
         lat: location.lat ?? undefined,
         lng: location.lng ?? undefined,
+        markerType: locationMarkerType(location),
       })),
     ];
     const filters = (
@@ -4643,7 +4706,7 @@ export default function Home() {
       planningAnalysis?.suggestions.filter(
         (suggestion) => !planningIgnoredSuggestionIds.includes(suggestion.id),
       ) ?? [];
-    const planningMapPoints = [
+    const planningMapPoints: MapPoint[] = [
       ...planningAssignments
         .map((assignment) =>
           activePeople.find((person) => person.id === assignment.personId),
@@ -4657,6 +4720,7 @@ export default function Home() {
         city: location.city,
         lat: location.lat ?? undefined,
         lng: location.lng ?? undefined,
+        markerType: locationMarkerType(location),
       })),
     ];
     return (

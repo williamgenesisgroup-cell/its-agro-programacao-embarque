@@ -13,9 +13,20 @@ test('entrega os fluxos operacionais solicitados', async () => {
   assert.match(page, /Comparar programação/);
   assert.match(page, /Local atual/);
   assert.match(page, /compareCandidateToDestination/);
-  assert.match(page, /Armazém/);
-  assert.match(page, /Silo/);
-  assert.match(page, /Descreva o tipo/);
+  const typeOptions =
+    page.match(/const LOCATION_TYPES = \[([\s\S]*?)\];/)?.[1] ?? '';
+  assert.match(typeOptions, /FAZENDA/);
+  assert.match(typeOptions, /ARMAZÉM/);
+  assert.match(typeOptions, /VAGÃO/);
+  assert.doesNotMatch(
+    typeOptions,
+    /Aeroporto|Rodoviária|Hotel|Empresa|Unidade|Silo|Terminal|Porto|Pátio|Filial|Ponto de encontro|Outro/,
+  );
+  assert.match(page, /Selecione/);
+  assert.match(page, /locationTypeFilter/);
+  assert.match(page, /location-map-icon-farm/);
+  assert.match(page, /location-map-icon-warehouse/);
+  assert.match(page, /location-map-icon-wagon/);
   assert.match(page, /Confirmar coordenadas/);
   assert.match(page, /Planejamento do dia/);
   assert.match(page, /Analisar programação/);
