@@ -97,3 +97,19 @@ void test('aceita rota real por adaptador configurado sem expor credenciais', ()
   assert.equal(plan.totalKm, 12.4);
   assert.match(plan.notice, /ROTA REAL/);
 });
+
+void test('volta para estimativa quando o adaptador real não retorna uma perna', () => {
+  const plan = buildRoutePlan({
+    points: [point('pessoa', -23.31, -51.16)],
+    destination: point('destino', -23.3, -51.15),
+    departureTime: '18:00',
+    arrivalLeadMinutes: 30,
+    stopBufferMinutes: 8,
+    calculationMode: 'real',
+    realRouteCalculator: () => null,
+  });
+  assert.equal(plan.calculationMode, 'estimate');
+  assert.equal(plan.confidence, 'medium');
+  assert.equal(plan.isApproximate, true);
+  assert.match(plan.notice, /provedor rodoviário não retornou/i);
+});

@@ -166,7 +166,7 @@ export function buildRoutePlan({
     calculationMode === 'real' && realRouteCalculator
       ? realRouteCalculator
       : estimateLeg;
-  const effectiveMode: RouteCalculationMode =
+  let effectiveMode: RouteCalculationMode =
     calculationMode === 'real' && realRouteCalculator ? 'real' : 'estimate';
   const ordered = orderedIds
     ? orderedIds
@@ -195,9 +195,17 @@ export function buildRoutePlan({
       notice: `${effectiveMode === 'real' ? 'ROTA REAL' : 'ESTIMATIVA RÁPIDA'}: informe latitude e longitude para calcular a rota. O endereço ainda não foi localizado por um provedor de mapas.`,
     };
 
-  const legs = ordered.map((point, index) =>
+  let legs = ordered.map((point, index) =>
     calculateLeg(point, ordered[index + 1] ?? destination),
   );
+  const realProviderFailed =
+    effectiveMode === 'real' && legs.some((leg) => leg == null);
+  if (realProviderFailed) {
+    effectiveMode = 'estimate';
+    legs = ordered.map((point, index) =>
+      estimateLeg(point, ordered[index + 1] ?? destination),
+    );
+  }
   const totalKm = legs.reduce(
     (total, leg) => total + (leg?.distanceKm ?? 0),
     0,
@@ -230,7 +238,7 @@ export function buildRoutePlan({
     notice:
       effectiveMode === 'real'
         ? 'ROTA REAL: distâncias e tempos calculados pelo provedor rodoviário configurado.'
-        : 'ESTIMATIVA RÁPIDA: planejamento por coordenadas. Configure um provedor rodoviário para distâncias e tempos reais.',
+        : `${realProviderFailed ? 'ESTIMATIVA RÁPIDA: o provedor rodoviário não retornou todas as pernas; ' : 'ESTIMATIVA RÁPIDA: '}planejamento por coordenadas. Configure um provedor rodoviário para distâncias e tempos reais.`,
   };
 }
 
