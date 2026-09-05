@@ -27,7 +27,7 @@ Em produção, o estado operacional é salvo no PostgreSQL compartilhado do Rend
 
 ## Estimativas e mapa
 
-Sem `GOOGLE_MAPS_API_KEY`, a aplicação informa claramente que usa distância aproximada por coordenadas (linha geográfica ajustada e velocidade média). Não existe chave falsa no código. Para distância rodoviária, tempo real, trânsito e polilinha de provedor, configure a chave e substitua o adaptador em `lib/route-service.ts` por um endpoint server-side; nunca exponha segredo no cliente.
+Sem um adaptador rodoviário ativo, a aplicação informa claramente `ESTIMATIVA RÁPIDA`: distância aproximada por coordenadas (linha geográfica ajustada e velocidade média), sem se passar por rota real. `buildRoutePlan` e `analyzeOperation` aceitam `calculationMode: 'real'` com um `realRouteCalculator` injetado, permitindo conectar OSRM, OpenRouteService ou Google Routes por endpoint server-side. O otimizador pode usar esse calculador com a mesma interface depois da etapa rápida de candidatos; nunca exponha chave ou segredo no cliente.
 
 ## Rodar localmente
 

@@ -199,6 +199,7 @@ type SuggestionDecision = {
   originalKm: number;
   suggestedKm: number;
   economyKm: number;
+  economyPercent?: number;
   decision: 'APLICADA' | 'IGNORADA';
 };
 type Schedule = {
@@ -370,6 +371,11 @@ function textValue(value: unknown) {
 function locationQualityOf(location: BoardingLocation) {
   if (location.lat == null || location.lng == null) return 'missing';
   return location.locationQuality || 'approximate';
+}
+function formatPercentage(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value)
+    ? '—'
+    : `${value.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%`;
 }
 function canonicalLocationType(value: unknown) {
   const rawType = normalizeText(textValue(value)).toUpperCase();
@@ -742,12 +748,14 @@ function normalizePersistedState(
 function persistedStateNeedsAudit(
   saved: Partial<import('@/lib/storage').PersistedState>,
 ) {
-  return [...(saved.people ?? []), ...(saved.locations ?? []), ...(saved.schedules ?? [])].some(
-    (item) => {
-      const record = item as Record<string, unknown>;
-      return !record.createdAt || !record.updatedAt;
-    },
-  );
+  return [
+    ...(saved.people ?? []),
+    ...(saved.locations ?? []),
+    ...(saved.schedules ?? []),
+  ].some((item) => {
+    const record = item as Record<string, unknown>;
+    return !record.createdAt || !record.updatedAt;
+  });
 }
 
 const SEED_PEOPLE: Person[] = [
@@ -954,7 +962,8 @@ function AuditMeta({
   if (!createdAt && !updatedAt) return null;
   return (
     <small className="record-audit">
-      Criado em {formatDateTime(createdAt)}{createdBy ? ` por ${createdBy}` : ''}
+      Criado em {formatDateTime(createdAt)}
+      {createdBy ? ` por ${createdBy}` : ''}
       {' · '}
       Alterado em {formatDateTime(updatedAt || createdAt)}
       {updatedBy ? ` por ${updatedBy}` : ''}
@@ -1741,7 +1750,11 @@ export default function Home() {
   const activeLocations = useMemo(
     () =>
       locations.filter(
-        (location) => location.active && LOCATION_TYPES.includes(location.type as (typeof LOCATION_TYPES)[number]),
+        (location) =>
+          location.active &&
+          LOCATION_TYPES.includes(
+            location.type as (typeof LOCATION_TYPES)[number],
+          ),
       ),
     [locations],
   );
@@ -2228,13 +2241,16 @@ export default function Home() {
         'error',
       );
     const now = new Date().toISOString();
-    const previous = locations.find((location) => location.id === locationDraft.id);
+    const previous = locations.find(
+      (location) => location.id === locationDraft.id,
+    );
     const record = normalizeLocation({
       ...locationDraft,
       id: locationDraft.id || makeId('location'),
       createdAt: previous?.createdAt || locationDraft.createdAt || now,
       updatedAt: now,
-      createdBy: previous?.createdBy || locationDraft.createdBy || OPERATION_USER,
+      createdBy:
+        previous?.createdBy || locationDraft.createdBy || OPERATION_USER,
       updatedBy: OPERATION_USER,
       normalizedName: normalizeText(locationDraft.name),
       locationQuality: hasCoordinates
@@ -2551,6 +2567,8 @@ export default function Home() {
             totalMinutes: next.totalMinutes,
             arrivalTime: next.routeStops[0]?.pickupTime ?? null,
             isApproximate: true,
+            calculationMode: 'estimate',
+            confidence: 'medium',
             notice:
               'Rota carregada do histórico. Recalcule após alterar a ordem.',
           }
@@ -2668,11 +2686,14 @@ export default function Home() {
     if (routeDirty || !routePlan)
       return notify('Calcule ou otimize a rota antes de salvar.', 'error');
     const now = new Date().toISOString();
-    const previous = schedules.find((schedule) => schedule.id === scheduleDraft.id);
+    const previous = schedules.find(
+      (schedule) => schedule.id === scheduleDraft.id,
+    );
     const record = {
       ...scheduleDraft,
       createdAt: previous?.createdAt || scheduleDraft.createdAt || now,
-      createdBy: previous?.createdBy || scheduleDraft.createdBy || OPERATION_USER,
+      createdBy:
+        previous?.createdBy || scheduleDraft.createdBy || OPERATION_USER,
       updatedAt: now,
       updatedBy: OPERATION_USER,
       destinationName: selectedLocation.name,
@@ -2828,6 +2849,10 @@ export default function Home() {
       suggestedKm: result.suggestedKm,
       originalMin: result.originalMin,
       suggestedMin: result.suggestedMin,
+      economyPercent:
+        result.originalKm > 0
+          ? ((result.originalKm - result.suggestedKm) / result.originalKm) * 100
+          : 0,
     };
   }
   function recordSuggestion(
@@ -2844,7 +2869,8 @@ export default function Home() {
         suggestedPerson: item.suggested.name,
         originalKm: item.originalKm,
         suggestedKm: item.suggestedKm,
-        economyKm: Math.max(0, item.originalKm - item.suggestedKm),
+        economyKm: item.originalKm - item.suggestedKm,
+        economyPercent: item.economyPercent,
         decision,
       },
     ]);
@@ -3233,11 +3259,13 @@ export default function Home() {
           </Field>
           <Field label="Tipo">
             <select
-              value={LOCATION_TYPES.includes(
-                locationDraft.type as (typeof LOCATION_TYPES)[number],
-              )
-                ? locationDraft.type
-                : ''}
+              value={
+                LOCATION_TYPES.includes(
+                  locationDraft.type as (typeof LOCATION_TYPES)[number],
+                )
+                  ? locationDraft.type
+                  : ''
+              }
               onChange={(event) =>
                 setLocationDraft((current) => ({
                   ...current,
@@ -4458,12 +4486,10 @@ export default function Home() {
                 <span>
                   ⏱{' '}
                   {formatDuration(
-                    Math.max(
-                      0,
-                      suggestion.originalMin - suggestion.suggestedMin,
-                    ),
+                    suggestion.originalMin - suggestion.suggestedMin,
                   )}
                 </span>
+                <span>📉 {formatPercentage(suggestion.economyPercent)}</span>
                 <span>
                   💰 R${' '}
                   {(
@@ -5471,6 +5497,11 @@ export default function Home() {
       planningAnalysis?.suggestions.filter(
         (suggestion) => !planningIgnoredSuggestionIds.includes(suggestion.id),
       ) ?? [];
+    const planningCalculationMode =
+      planningAnalysis?.calculationMode ?? 'estimate';
+    const planningConfidence =
+      planningAnalysis?.confidence ??
+      (planningAnalysis?.missingCoordinates.length ? 'low' : 'medium');
     const planningMapPoints: MapPoint[] = [
       ...planningAssignments
         .map((assignment) =>
@@ -5721,6 +5752,15 @@ export default function Home() {
                   </div>
                 </div>
                 <div className="planning-factors">
+                  <p>
+                    <Info size={14} />{' '}
+                    {planningCalculationMode === 'real'
+                      ? 'ROTA REAL'
+                      : 'ESTIMATIVA RÁPIDA'}{' '}
+                    · confiança {planningConfidence.toUpperCase()}
+                  </p>
+                </div>
+                <div className="planning-factors">
                   {planningAnalysis.factors.map((factor) => (
                     <p key={factor}>
                       <Info size={14} /> {factor}
@@ -5783,7 +5823,8 @@ export default function Home() {
                       <span>Economia estimada</span>
                       <strong>
                         {formatDistance(suggestion.economyKm)} ·{' '}
-                        {formatDuration(suggestion.economyMinutes)}
+                        {formatDuration(suggestion.economyMinutes)} ·{' '}
+                        {formatPercentage(suggestion.economyPercent)}
                       </strong>
                     </div>
                     <div className="planning-suggestion-actions">
@@ -5928,7 +5969,9 @@ export default function Home() {
                         </small>
                         <small className="table-subtext">
                           Alterado em{' '}
-                          {formatDateTime(schedule.updatedAt || schedule.createdAt)}
+                          {formatDateTime(
+                            schedule.updatedAt || schedule.createdAt,
+                          )}
                         </small>
                       </td>
                       <td>
@@ -6007,6 +6050,9 @@ export default function Home() {
                       <small>
                         {formatDate(item.date.slice(0, 10))} · economia
                         potencial {formatDistance(item.economyKm)}
+                        {item.economyPercent != null
+                          ? ` · redução ${formatPercentage(item.economyPercent)}`
+                          : ''}
                       </small>
                     </span>
                     <Badge
@@ -6062,7 +6108,10 @@ export default function Home() {
               <input value={currentScreen} readOnly />
             </Field>
             <Field label="Data/hora">
-              <input value={formatDateTime(new Date().toISOString())} readOnly />
+              <input
+                value={formatDateTime(new Date().toISOString())}
+                readOnly
+              />
             </Field>
             <Field label="Descrição" className="span-2">
               <textarea
@@ -6092,8 +6141,8 @@ export default function Home() {
             <Badge tone="olive">Versão {APP_VERSION}</Badge>
           </div>
           <p className="section-description">
-            Exporte pessoas, locais, programações, histórico e feedbacks em
-            JSON para manter uma cópia antes de qualquer migração futura.
+            Exporte pessoas, locais, programações, histórico e feedbacks em JSON
+            para manter uma cópia antes de qualquer migração futura.
           </p>
           <button
             type="button"
@@ -6116,19 +6165,24 @@ export default function Home() {
               {feedbacks.slice(0, 8).map((feedback) => (
                 <article className="suggestion-history-row" key={feedback.id}>
                   <div>
-                    <Badge tone={feedback.type === 'ERRO' ? 'inactive' : 'olive'}>
+                    <Badge
+                      tone={feedback.type === 'ERRO' ? 'inactive' : 'olive'}
+                    >
                       {feedback.type}
                     </Badge>
                     <strong>{feedback.description}</strong>
                     <small>
-                      {feedback.currentScreen} · {formatDateTime(feedback.createdAt)}
+                      {feedback.currentScreen} ·{' '}
+                      {formatDateTime(feedback.createdAt)}
                     </small>
                   </div>
                 </article>
               ))}
             </div>
           ) : (
-            <p className="section-description">Nenhum feedback enviado ainda.</p>
+            <p className="section-description">
+              Nenhum feedback enviado ainda.
+            </p>
           )}
         </section>
       </>

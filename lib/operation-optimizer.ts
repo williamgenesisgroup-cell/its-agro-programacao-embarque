@@ -1,13 +1,10 @@
 import { estimateLeg } from './route-service.mjs';
-
-type RoutePoint = {
-  id: string;
-  label: string;
-  address: string;
-  city: string;
-  lat?: number;
-  lng?: number;
-};
+import type {
+  RouteCalculationMode,
+  RouteConfidence,
+  RouteLegCalculator,
+  RoutePoint,
+} from './route-service';
 
 export type OptimizerPerson = {
   id: string;
@@ -54,6 +51,7 @@ export type OperationSuggestion = {
   suggestedMinutes: number | null;
   economyKm: number;
   economyMinutes: number;
+  economyPercent: number;
   reason: string;
 };
 
@@ -68,6 +66,8 @@ export type OperationAnalysis = {
   suggestions: OperationSuggestion[];
   factors: string[];
   priority: OperationPriority;
+  calculationMode: RouteCalculationMode;
+  confidence: RouteConfidence;
   limits: {
     maxDistanceKm: number | null;
     maxMinutes: number | null;
@@ -115,6 +115,15 @@ function metric(
   return km + minutes * 0.32;
 }
 
+function economy(current: number | null, suggested: number | null) {
+  return current != null && suggested != null ? current - suggested : 0;
+}
+
+function economyPercent(current: number | null, suggested: number | null) {
+  if (current == null || suggested == null || current <= 0) return 0;
+  return ((current - suggested) / current) * 100;
+}
+
 function orientation(
   a: [number, number],
   b: [number, number],
@@ -139,6 +148,7 @@ function evaluateAssignments(
   peopleById: Map<string, OptimizerPerson>,
   locationsById: Map<string, OptimizerLocation>,
   limits: { maxDistanceKm: number | null; maxMinutes: number | null },
+  calculateLeg: RouteLegCalculator,
 ): AssignmentEvaluation {
   let totalKm = 0;
   let totalMinutes = 0;
@@ -166,7 +176,10 @@ function evaluateAssignments(
     if (person.operationalStatus === 'Indisponível') {
       conflicts.push(`${person.name} está marcada como indisponível.`);
     }
-    const leg = estimateLeg(pointForPerson(person), pointForLocation(location));
+    const leg = calculateLeg(
+      pointForPerson(person),
+      pointForLocation(location),
+    );
     if (!leg) {
       hasMissing = true;
       missingCoordinates.push(person.name, location.name);
@@ -268,6 +281,8 @@ export function analyzeOperation({
   priority = 'balanced',
   maxDistanceKm = null,
   maxMinutes = null,
+  calculationMode = 'estimate',
+  legCalculator,
 }: {
   assignments: OperationAssignment[];
   people: OptimizerPerson[];
@@ -275,7 +290,13 @@ export function analyzeOperation({
   priority?: OperationPriority;
   maxDistanceKm?: number | null;
   maxMinutes?: number | null;
+  calculationMode?: RouteCalculationMode;
+  legCalculator?: RouteLegCalculator;
 }): OperationAnalysis {
+  const calculateLeg: RouteLegCalculator =
+    calculationMode === 'real' && legCalculator ? legCalculator : estimateLeg;
+  const effectiveMode: RouteCalculationMode =
+    calculationMode === 'real' && legCalculator ? 'real' : 'estimate';
   const peopleById = new Map(
     people
       .filter((person) => person.active !== false)
@@ -292,6 +313,7 @@ export function analyzeOperation({
     peopleById,
     locationsById,
     limits,
+    calculateLeg,
   );
   const suggestions: OperationSuggestion[] = [];
   const baseline = metric(current.totalKm, current.totalMinutes, priority);
@@ -306,6 +328,7 @@ export function analyzeOperation({
         peopleById,
         locationsById,
         limits,
+        calculateLeg,
       );
       const candidateMetric = metric(
         candidate.totalKm,
@@ -322,14 +345,6 @@ export function analyzeOperation({
         );
         if (!firstPerson || !secondPerson || !firstLocation || !secondLocation)
           continue;
-        const currentFirst = estimateLeg(
-          pointForPerson(firstPerson),
-          pointForLocation(firstLocation),
-        );
-        const candidateFirst = estimateLeg(
-          pointForPerson(secondPerson),
-          pointForLocation(firstLocation),
-        );
         suggestions.push({
           id: `swap-${assignments[first].id}-${assignments[second].id}`,
           kind: 'swap',
@@ -343,25 +358,20 @@ export function analyzeOperation({
           suggestedKm: candidate.totalKm,
           currentMinutes: current.totalMinutes,
           suggestedMinutes: candidate.totalMinutes,
-          economyKm: Math.max(
-            0,
-            (current.totalKm ?? 0) - (candidate.totalKm ?? 0),
-          ),
-          economyMinutes: Math.max(
-            0,
-            (current.totalMinutes ?? 0) - (candidate.totalMinutes ?? 0),
-          ),
+          economyKm: economy(current.totalKm, candidate.totalKm),
+          economyMinutes: economy(current.totalMinutes, candidate.totalMinutes),
+          economyPercent: economyPercent(current.totalKm, candidate.totalKm),
           reason: `${secondPerson.name} fica mais perto de ${firstLocation.name}; ${firstPerson.name} atende melhor ${secondLocation.name}.`,
         });
-        void currentFirst;
-        void candidateFirst;
       }
     }
   }
   suggestions.sort(
     (a, b) =>
-      metric(b.suggestedKm, b.suggestedMinutes, priority) -
-      metric(a.suggestedKm, a.suggestedMinutes, priority),
+      metric(a.suggestedKm, a.suggestedMinutes, priority) -
+        metric(b.suggestedKm, b.suggestedMinutes, priority) ||
+      b.economyKm - a.economyKm ||
+      b.economyMinutes - a.economyMinutes,
   );
   const bestSuggestions = suggestions.slice(0, 3);
   const factors: string[] = [];
@@ -369,8 +379,7 @@ export function analyzeOperation({
     factors.push(
       'Há cadastros sem coordenadas confirmadas; a distância total precisa ser completada no mapa.',
     );
-  if (current.crossings)
-    factors.push(`${current.crossings} cruzamento(s) de rota identificado(s).`);
+  if (current.crossings) factors.push('⚠️ POSSÍVEL CRUZAMENTO LOGÍSTICO');
   if (current.conflicts.length)
     factors.push(
       'Existem conflitos de distância, horário ou disponibilidade para revisar.',
@@ -379,7 +388,16 @@ export function analyzeOperation({
     factors.push(
       'As sugestões priorizam menor deslocamento e preservam a decisão manual da operação.',
     );
-  if (!factors.length)
+  factors.unshift(
+    effectiveMode === 'real'
+      ? 'ROTA REAL: cálculo preparado para o provedor rodoviário configurado.'
+      : 'ESTIMATIVA RÁPIDA: cálculo por coordenadas; não representa uma rota rodoviária real.',
+  );
+  if (
+    factors.length === 1 &&
+    !current.conflicts.length &&
+    !bestSuggestions.length
+  )
     factors.push('A programação está coerente com os dados disponíveis.');
   const penalty =
     current.conflicts.length * 12 +
@@ -403,6 +421,12 @@ export function analyzeOperation({
     suggestions: bestSuggestions,
     factors,
     priority,
+    calculationMode: effectiveMode,
+    confidence: current.missingCoordinates.length
+      ? 'low'
+      : effectiveMode === 'real'
+        ? 'high'
+        : 'medium',
     limits,
   };
 }

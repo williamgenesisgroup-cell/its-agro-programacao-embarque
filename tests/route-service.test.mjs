@@ -51,7 +51,9 @@ void test('otimiza a ordem e calcula horários regressivos até o destino', () =
   assert.ok(plan.totalMinutes > 0);
   assert.ok(plan.stops.every((stop) => stop.pickupTime));
   assert.equal(plan.arrivalTime, '17:30');
-  assert.match(plan.notice, /aproximado/i);
+  assert.equal(plan.calculationMode, 'estimate');
+  assert.equal(plan.confidence, 'medium');
+  assert.match(plan.notice, /ESTIMATIVA RÁPIDA/i);
 });
 
 void test('mantém a ordem informada quando faltam coordenadas', () => {
@@ -72,5 +74,26 @@ void test('mantém a ordem informada quando faltam coordenadas', () => {
     ['primeiro', 'segundo'],
   );
   assert.equal(plan.totalKm, null);
+  assert.equal(plan.confidence, 'low');
   assert.match(plan.notice, /latitude e longitude/i);
+});
+
+void test('aceita rota real por adaptador configurado sem expor credenciais', () => {
+  const destination = point('destino', -23.3, -51.15);
+  const people = [point('pessoa', -23.31, -51.16)];
+  const realRouteCalculator = () => ({ distanceKm: 12.4, durationMin: 19 });
+  const plan = buildRoutePlan({
+    points: people,
+    destination,
+    departureTime: '18:00',
+    arrivalLeadMinutes: 30,
+    stopBufferMinutes: 8,
+    calculationMode: 'real',
+    realRouteCalculator,
+  });
+  assert.equal(plan.calculationMode, 'real');
+  assert.equal(plan.confidence, 'high');
+  assert.equal(plan.isApproximate, false);
+  assert.equal(plan.totalKm, 12.4);
+  assert.match(plan.notice, /ROTA REAL/);
 });

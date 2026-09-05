@@ -15,12 +15,25 @@ export type RouteStop = RoutePoint & {
   pickupTime: string | null;
 };
 
+export type RouteCalculationMode = 'estimate' | 'real';
+export type RouteConfidence = 'high' | 'medium' | 'low';
+export type RouteLeg = {
+  distanceKm: number;
+  durationMin: number;
+};
+export type RouteLegCalculator = (
+  from: RoutePoint,
+  to: RoutePoint,
+) => RouteLeg | null;
+
 export type RoutePlan = {
   stops: RouteStop[];
   totalKm: number | null;
   totalMinutes: number | null;
   arrivalTime: string | null;
   isApproximate: boolean;
+  calculationMode: RouteCalculationMode;
+  confidence: RouteConfidence;
   notice: string;
 };
 
@@ -45,7 +58,7 @@ export function haversineKm(a: RoutePoint, b: RoutePoint) {
   );
 }
 
-export function estimateLeg(a: RoutePoint, b: RoutePoint) {
+export function estimateLeg(a: RoutePoint, b: RoutePoint): RouteLeg | null {
   const straightLineKm = haversineKm(a, b);
   if (straightLineKm == null) return null;
   const distanceKm = Math.max(0.4, straightLineKm * 1.28);
@@ -53,10 +66,14 @@ export function estimateLeg(a: RoutePoint, b: RoutePoint) {
   return { distanceKm, durationMin };
 }
 
-function scoreOrder(order: RoutePoint[], destination: RoutePoint) {
+function scoreOrder(
+  order: RoutePoint[],
+  destination: RoutePoint,
+  calculateLeg: RouteLegCalculator,
+) {
   let total = 0;
   for (let index = 0; index < order.length; index += 1) {
-    const leg = estimateLeg(order[index], order[index + 1] ?? destination);
+    const leg = calculateLeg(order[index], order[index + 1] ?? destination);
     if (!leg) return Number.POSITIVE_INFINITY;
     total += leg.distanceKm;
   }
@@ -79,7 +96,11 @@ function permutations(points: RoutePoint[], limit = 7) {
   return result;
 }
 
-export function optimizeOrder(points: RoutePoint[], destination: RoutePoint) {
+export function optimizeOrder(
+  points: RoutePoint[],
+  destination: RoutePoint,
+  calculateLeg: RouteLegCalculator = estimateLeg,
+) {
   const ready =
     points.every((point) => point.lat != null && point.lng != null) &&
     destination.lat != null &&
@@ -88,7 +109,8 @@ export function optimizeOrder(points: RoutePoint[], destination: RoutePoint) {
   const candidates = permutations(points);
   if (candidates)
     return candidates.reduce((best, candidate) =>
-      scoreOrder(candidate, destination) < scoreOrder(best, destination)
+      scoreOrder(candidate, destination, calculateLeg) <
+      scoreOrder(best, destination, calculateLeg)
         ? candidate
         : best,
     );
@@ -100,8 +122,8 @@ export function optimizeOrder(points: RoutePoint[], destination: RoutePoint) {
     ordered.push(current);
     if (!remaining.length) break;
     const nextIndex = remaining.reduce((bestIndex, point, index) => {
-      const best = estimateLeg(current as RoutePoint, remaining[bestIndex]);
-      const candidate = estimateLeg(current as RoutePoint, point);
+      const best = calculateLeg(current as RoutePoint, remaining[bestIndex]);
+      const candidate = calculateLeg(current as RoutePoint, point);
       return candidate && (!best || candidate.durationMin < best.durationMin)
         ? index
         : bestIndex;
@@ -128,6 +150,8 @@ export function buildRoutePlan({
   arrivalLeadMinutes,
   stopBufferMinutes,
   orderedIds,
+  calculationMode = 'estimate',
+  realRouteCalculator,
 }: {
   points: RoutePoint[];
   destination: RoutePoint;
@@ -135,12 +159,20 @@ export function buildRoutePlan({
   arrivalLeadMinutes: number;
   stopBufferMinutes: number;
   orderedIds?: string[];
+  calculationMode?: RouteCalculationMode;
+  realRouteCalculator?: RouteLegCalculator;
 }): RoutePlan {
+  const calculateLeg: RouteLegCalculator =
+    calculationMode === 'real' && realRouteCalculator
+      ? realRouteCalculator
+      : estimateLeg;
+  const effectiveMode: RouteCalculationMode =
+    calculationMode === 'real' && realRouteCalculator ? 'real' : 'estimate';
   const ordered = orderedIds
     ? orderedIds
         .map((id) => points.find((point) => point.id === id))
         .filter((point): point is RoutePoint => Boolean(point))
-    : optimizeOrder(points, destination);
+    : optimizeOrder(points, destination, calculateLeg);
   const ready =
     ordered.every((point) => point.lat != null && point.lng != null) &&
     destination.lat != null &&
@@ -157,13 +189,14 @@ export function buildRoutePlan({
       totalKm: null,
       totalMinutes: null,
       arrivalTime: null,
-      isApproximate: true,
-      notice:
-        'Informe latitude e longitude para calcular a rota. O endereço ainda não foi localizado por um provedor de mapas.',
+      isApproximate: effectiveMode !== 'real',
+      calculationMode: effectiveMode,
+      confidence: 'low',
+      notice: `${effectiveMode === 'real' ? 'ROTA REAL' : 'ESTIMATIVA RÁPIDA'}: informe latitude e longitude para calcular a rota. O endereço ainda não foi localizado por um provedor de mapas.`,
     };
 
   const legs = ordered.map((point, index) =>
-    estimateLeg(point, ordered[index + 1] ?? destination),
+    calculateLeg(point, ordered[index + 1] ?? destination),
   );
   const totalKm = legs.reduce(
     (total, leg) => total + (leg?.distanceKm ?? 0),
@@ -191,9 +224,13 @@ export function buildRoutePlan({
     totalKm,
     totalMinutes,
     arrivalTime: formatTime(arrival),
-    isApproximate: true,
+    isApproximate: effectiveMode !== 'real',
+    calculationMode: effectiveMode,
+    confidence: effectiveMode === 'real' ? 'high' : 'medium',
     notice:
-      'Planejamento aproximado por coordenadas. Configure um provedor rodoviário para distâncias e tempos reais.',
+      effectiveMode === 'real'
+        ? 'ROTA REAL: distâncias e tempos calculados pelo provedor rodoviário configurado.'
+        : 'ESTIMATIVA RÁPIDA: planejamento por coordenadas. Configure um provedor rodoviário para distâncias e tempos reais.',
   };
 }
 
