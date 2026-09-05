@@ -85,16 +85,18 @@ create policy settings_api_access on public.settings
   with check (current_setting('app.access_granted', true) = 'true');
 `;
 
-const pool = process.env.DATABASE_URL
+const databaseUrl = process.env.DATABASE_URL || '';
+const databaseSsl =
+  process.env.DATABASE_SSL === 'true' ||
+  /(?:^|\.)render\.com(?::|\/|$)/i.test(databaseUrl);
+
+const pool = databaseUrl
   ? new Pool({
-      connectionString: process.env.DATABASE_URL,
+      connectionString: databaseUrl,
       max: Number(process.env.DATABASE_POOL_MAX || 5),
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
-      ssl:
-        process.env.DATABASE_SSL === 'true'
-          ? { rejectUnauthorized: false }
-          : undefined,
+      ssl: databaseSsl ? { rejectUnauthorized: false } : undefined,
     })
   : null;
 
