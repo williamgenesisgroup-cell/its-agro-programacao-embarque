@@ -12,7 +12,7 @@ function rows(count) {
   }));
 }
 
-test('gera uma única mensagem resumida para 1, 5 e 10 pessoas', () => {
+void test('gera uma única mensagem resumida para 1, 5 e 10 pessoas', () => {
   for (const count of [1, 5, 10]) {
     const message = buildMassWhatsAppMessage({
       date: '2026-09-04',
@@ -26,7 +26,7 @@ test('gera uma única mensagem resumida para 1, 5 e 10 pessoas', () => {
   }
 });
 
-test('modo completo inclui endereço resumido e mantém ordem', () => {
+void test('modo completo inclui endereço resumido e mantém ordem', () => {
   const message = buildMassWhatsAppMessage({
     date: '2026-09-04',
     rows: rows(2),
@@ -38,7 +38,7 @@ test('modo completo inclui endereço resumido e mantém ordem', () => {
   assert.match(message, /⚠️ Estejam prontos nos horários informados\./);
 });
 
-test('sem horários usa o cabeçalho curto sem criar linhas individuais de conversa', () => {
+void test('sem horários usa o cabeçalho curto sem criar linhas individuais de conversa', () => {
   const message = buildMassWhatsAppMessage({
     date: '2026-09-04',
     rows: rows(3).map((row) => ({ ...row, time: null })),

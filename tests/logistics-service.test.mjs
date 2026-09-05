@@ -17,7 +17,7 @@ const destination = {
   lng: 0,
 };
 
-test('sugere troca com economia relevante de km e tempo', () => {
+void test('sugere troca com economia relevante de km e tempo', () => {
   const result = compareCandidateToDestination(
     [candidate('original', 10, 0)],
     [candidate('melhor', 1, 0)],
@@ -29,7 +29,7 @@ test('sugere troca com economia relevante de km e tempo', () => {
   assert.ok((result?.originalMin ?? 0) > (result?.suggestedMin ?? 0));
 });
 
-test('não sugere quando a economia não atinge o limite', () => {
+void test('não sugere quando a economia não atinge o limite', () => {
   const result = compareCandidateToDestination(
     [candidate('original', 1, 0)],
     [candidate('parecido', 1.1, 0)],
@@ -38,7 +38,7 @@ test('não sugere quando a economia não atinge o limite', () => {
   assert.equal(result, null);
 });
 
-test('ignora candidato ocupado e mantém a sugestão opcional', () => {
+void test('ignora candidato ocupado e mantém a sugestão opcional', () => {
   const result = compareCandidateToDestination(
     [candidate('original', 10, 0)],
     [candidate('ocupado', 0.5, 0), candidate('livre', 2, 0)],
@@ -48,7 +48,7 @@ test('ignora candidato ocupado e mantém a sugestão opcional', () => {
   assert.equal(result?.suggested.id, 'livre');
 });
 
-test('não inventa economia em rotas opostas equivalentes', () => {
+void test('não inventa economia em rotas opostas equivalentes', () => {
   const result = compareCandidateToDestination(
     [candidate('norte', 1, 0)],
     [candidate('sul', -1, 0)],

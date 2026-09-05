@@ -16,7 +16,7 @@ const point = (id, lat, lng) => ({
   lng,
 });
 
-test('estima uma perna apenas quando existem coordenadas', () => {
+void test('estima uma perna apenas quando existem coordenadas', () => {
   assert.ok(
     estimateLeg(point('a', -23.31, -51.17), point('b', -23.32, -51.16))
       ?.distanceKm > 0,
@@ -30,7 +30,7 @@ test('estima uma perna apenas quando existem coordenadas', () => {
   );
 });
 
-test('otimiza a ordem e calcula horários regressivos até o destino', () => {
+void test('otimiza a ordem e calcula horários regressivos até o destino', () => {
   const destination = point('destino', -23.3, -51.15);
   const people = [
     point('longe', -23.55, -51.3),
@@ -54,7 +54,7 @@ test('otimiza a ordem e calcula horários regressivos até o destino', () => {
   assert.match(plan.notice, /aproximado/i);
 });
 
-test('mantém a ordem informada quando faltam coordenadas', () => {
+void test('mantém a ordem informada quando faltam coordenadas', () => {
   const destination = point('destino', -23.3, -51.15);
   const people = [
     point('primeiro', undefined, undefined),

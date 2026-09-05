@@ -3,7 +3,7 @@ services:
     name: its-agro-programacao-embarque
     runtime: node
     plan: free
-    buildCommand: pnpm install --frozen-lockfile && pnpm run build
+    buildCommand: pnpm install --frozen-lockfile && pnpm run build:render
     startCommand: pnpm run start:render
     healthCheckPath: /api/health
     envVars:

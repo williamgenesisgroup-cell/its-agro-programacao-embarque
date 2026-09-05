@@ -21,7 +21,7 @@ const location = (id, lat, lng) => ({
   lng,
 });
 
-test('analisa dez pessoas e dez locais, sugere melhoria sem aplicar automaticamente', () => {
+void test('analisa dez pessoas e dez locais, sugere melhoria sem aplicar automaticamente', () => {
   const people = Array.from({ length: 10 }, (_, index) =>
     person(`p${index}`, -23.3 - index * 0.01, -51.15 - index * 0.01),
   );
@@ -57,7 +57,7 @@ test('analisa dez pessoas e dez locais, sugere melhoria sem aplicar automaticame
   assert.ok((after.totalKm ?? Infinity) < (analysis.totalKm ?? Infinity));
 });
 
-test('mantém a análise útil quando faltam coordenadas', () => {
+void test('mantém a análise útil quando faltam coordenadas', () => {
   const analysis = analyzeOperation({
     assignments: [{ id: 'a1', personId: 'p1', locationId: 'l1' }],
     people: [person('p1', null, null)],

@@ -1,11 +1,15 @@
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Pool } from 'pg';
-import { Readable } from 'node:stream';
 
 const port = Number(process.env.PORT || 8787);
-const workerPort = port + 1;
+const staticRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../dist/render-client',
+);
 const siteOrigin =
   'https://its-agro-programacao-embarque.william-alexandredas.chatgpt.site';
 const renderOrigin = 'https://its-agro-programacao-embarque.onrender.com';
@@ -317,42 +321,64 @@ const handleApi = async (request, response) => {
   }
 };
 
-const child = spawn(
-  'pnpm',
-  [
-    'exec',
-    'wrangler',
-    'dev',
-    '--config',
-    'dist/server/wrangler.json',
-    '--ip',
-    '127.0.0.1',
-    '--port',
-    String(workerPort),
-  ],
-  {
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-    env: { ...process.env, PORT: String(workerPort) },
-  },
-);
+const mimeTypes = {
+  '.css': 'text/css; charset=utf-8',
+  '.gif': 'image/gif',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+};
 
-const proxy = async (request, response) => {
-  const upstream = await fetch(`http://127.0.0.1:${workerPort}${request.url}`, {
-    method: request.method,
-    headers: request.headers,
-    body: ['GET', 'HEAD'].includes(request.method || '')
-      ? undefined
-      : await readBody(request),
+const isWithinStaticRoot = (filePath) =>
+  filePath === staticRoot || filePath.startsWith(`${staticRoot}${path.sep}`);
+
+const serveStatic = async (request, response) => {
+  const url = new URL(request.url || '/', `http://${request.headers.host}`);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    response.writeHead(400);
+    response.end('Bad Request');
+    return;
+  }
+
+  const requestedPath = pathname === '/' ? '/index.html' : pathname;
+  const filePath = path.resolve(staticRoot, `.${requestedPath}`);
+  const hasAssetExtension = path.extname(requestedPath) !== '';
+  let resolvedPath = filePath;
+  try {
+    if (!isWithinStaticRoot(filePath)) throw new Error('invalid path');
+    const fileInfo = await stat(filePath);
+    if (!fileInfo.isFile()) throw new Error('not a file');
+  } catch {
+    if (hasAssetExtension || pathname.startsWith('/_next/')) {
+      response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      response.end('Not Found');
+      return;
+    }
+    resolvedPath = path.join(staticRoot, 'index.html');
+  }
+
+  const payload = await readFile(resolvedPath);
+  const extension = path.extname(resolvedPath).toLowerCase();
+  response.writeHead(200, {
+    'content-type': mimeTypes[extension] || 'application/octet-stream',
+    'cache-control': extension === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
   });
-  response.writeHead(upstream.status, Object.fromEntries(upstream.headers));
-  if (upstream.body) Readable.fromWeb(upstream.body).pipe(response);
+  if (request.method !== 'HEAD') response.end(payload);
   else response.end();
 };
 
 const server = createServer(async (request, response) => {
   try {
-    if (!(await handleApi(request, response))) await proxy(request, response);
+    if (!(await handleApi(request, response))) await serveStatic(request, response);
   } catch (error) {
     console.error('[render-gateway] request failed', error);
     if (!response.headersSent) response.writeHead(502);
@@ -361,17 +387,12 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, '0.0.0.0', () => {
-  console.log(`[render-gateway] listening on ${port}; worker on ${workerPort}`);
+  console.log(`[render-gateway] listening on ${port}; static app at ${staticRoot}`);
 });
 
-const shutdown = async (signal) => {
+const shutdown = async () => {
   server.close();
-  child.kill(signal);
   await pool?.end().catch(() => undefined);
 };
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-child.on('exit', (code, signal) => {
-  if (signal) process.exit(1);
-  if (code && code !== 0) process.exit(code);
-});
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

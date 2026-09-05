@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
+    "build:render": "vite build --config vite.render.config.ts",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "start:render": "node scripts/start-render.mjs",
     "lint": "oxlint --ignore-pattern components/ui --ignore-pattern hooks",

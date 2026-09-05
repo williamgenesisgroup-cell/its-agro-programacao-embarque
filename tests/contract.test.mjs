@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('entrega os fluxos operacionais solicitados', async () => {
+void test('entrega os fluxos operacionais solicitados', async () => {
   const page = await readFile(
     new URL('../app/page.tsx', import.meta.url),
     'utf8',
@@ -44,7 +44,7 @@ test('entrega os fluxos operacionais solicitados', async () => {
   assert.doesNotMatch(page, /autoFocus/);
 });
 
-test('mantém contrato de banco e publicação', async () => {
+void test('mantém contrato de banco e publicação', async () => {
   const migration = await readFile(
     new URL('../db/migrations/001_init.sql', import.meta.url),
     'utf8',
