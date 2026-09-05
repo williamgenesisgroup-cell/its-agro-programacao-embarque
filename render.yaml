@@ -11,6 +11,8 @@ services:
         value: '22.13.0'
       - key: DATABASE_URL
         sync: false
+      - key: DATABASE_SSL
+        value: 'true'
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY

@@ -130,14 +130,24 @@ let migrationPromise;
 const ensureDatabase = async () => {
   if (!pool) throw new Error('DATABASE_URL não configurada');
   if (!migrationPromise) {
-    migrationPromise = pool
-      .query(migration)
-      .then(() => undefined)
-      .catch((error) => {
+    migrationPromise = (async () => {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        await client.query("select set_config('app.access_granted', 'true', true)");
+        await client.query(migration);
+        await client.query('commit');
+      } catch (error) {
+        await client.query('rollback').catch(() => undefined);
         console.error(`[render-gateway] database migration failed: ${describeDatabaseError(error)}`);
-        migrationPromise = undefined;
         throw error;
-      });
+      } finally {
+        client.release();
+      }
+    })().catch((error) => {
+      migrationPromise = undefined;
+      throw error;
+    });
   }
   await migrationPromise;
 };
