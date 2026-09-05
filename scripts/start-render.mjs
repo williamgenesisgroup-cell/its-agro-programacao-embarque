@@ -102,6 +102,19 @@ const databaseConnectionString = (() => {
     return databaseUrl;
   }
 })();
+const databaseTarget = (() => {
+  try {
+    const url = new URL(databaseUrl);
+    return `${url.hostname}:${url.port || 5432}/${url.pathname.slice(1)}`;
+  } catch {
+    return databaseUrl ? 'unparsed-database-url' : 'not-configured';
+  }
+})();
+const describeDatabaseError = (error) => {
+  const code = error?.code || error?.name || 'unknown';
+  const message = String(error?.message || error).replaceAll(databaseUrl, '[redacted]');
+  return `${code}: ${message}`;
+};
 
 const pool = databaseUrl
   ? new Pool({
@@ -121,6 +134,7 @@ const ensureDatabase = async () => {
       .query(migration)
       .then(() => undefined)
       .catch((error) => {
+        console.error(`[render-gateway] database migration failed: ${describeDatabaseError(error)}`);
         migrationPromise = undefined;
         throw error;
       });
@@ -227,7 +241,8 @@ const handleApi = async (request, response) => {
         );
         database = 'online';
         databaseVersion = Number(result.rows[0]?.version || 0);
-      } catch {
+      } catch (error) {
+        console.error(`[render-gateway] database health failed: ${describeDatabaseError(error)}`);
         database = 'error';
       }
     }
@@ -402,7 +417,9 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, '0.0.0.0', () => {
-  console.log(`[render-gateway] listening on ${port}; static app at ${staticRoot}`);
+  console.log(
+    `[render-gateway] listening on ${port}; static app at ${staticRoot}; database=${Boolean(databaseUrl)} ssl=${databaseSsl} target=${databaseTarget}`,
+  );
 });
 
 const shutdown = async () => {
