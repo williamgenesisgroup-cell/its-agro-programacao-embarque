@@ -89,10 +89,23 @@ const databaseUrl = process.env.DATABASE_URL || '';
 const databaseSsl =
   process.env.DATABASE_SSL === 'true' ||
   /(?:^|\.)render\.com(?::|\/|$)/i.test(databaseUrl);
+const databaseConnectionString = (() => {
+  if (!databaseSsl) return databaseUrl;
+  try {
+    const url = new URL(databaseUrl);
+    for (const parameter of ['ssl', 'sslmode', 'sslcert', 'sslkey', 'sslrootcert']) {
+      url.searchParams.delete(parameter);
+    }
+    url.searchParams.set('sslmode', 'no-verify');
+    return url.toString();
+  } catch {
+    return databaseUrl;
+  }
+})();
 
 const pool = databaseUrl
   ? new Pool({
-      connectionString: databaseUrl,
+      connectionString: databaseConnectionString,
       max: Number(process.env.DATABASE_POOL_MAX || 5),
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
