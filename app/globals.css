@@ -3329,6 +3329,20 @@ a {
   .app-main {
     overflow-x: clip;
   }
+  .content > *,
+  .card,
+  .dashboard-hero,
+  .metrics-grid,
+  .intelligence-grid,
+  .dashboard-grid {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .metrics-grid,
+  .intelligence-grid,
+  .dashboard-grid {
+    width: 100%;
+  }
   .sidebar {
     z-index: 80;
     width: min(320px, calc(100vw - 32px));
@@ -3509,6 +3523,7 @@ a {
     bottom: max(8px, env(safe-area-inset-bottom));
     min-height: 70px;
     padding: 6px;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
   .mobile-bottom-nav button {
     min-width: 0;
